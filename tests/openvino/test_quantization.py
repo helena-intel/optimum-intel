@@ -18,8 +18,8 @@ from functools import partial
 
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
+from optimum.intel.openvino.configuration import OVConfig
 from optimum.intel.openvino.modeling import OVModelForSequenceClassification
-from optimum.intel.openvino.nncf_config import DEFAULT_QUANTIZATION_CONFIG
 from optimum.intel.openvino.quantization import OVQuantizer
 from parameterized import parameterized
 
@@ -31,6 +31,8 @@ class OVQuantizerTest(unittest.TestCase):
 
     @parameterized.expand(SUPPORTED_ARCHITECTURES_WITH_EXPECTED_QUANTIZED_MATMULS)
     def test_static_quantization(self, model_name, expected_fake_quantize):
+        quantization_config = OVConfig()
+
         def preprocess_function(examples, tokenizer):
             return tokenizer(examples["sentence"], padding="max_length", max_length=128, truncation=True)
 
@@ -47,7 +49,7 @@ class OVQuantizerTest(unittest.TestCase):
             )
             quantizer.quantize(
                 save_directory=tmp_dir,
-                quantization_config=DEFAULT_QUANTIZATION_CONFIG,
+                quantization_config=quantization_config,
                 calibration_dataset=calibration_dataset,
             )
             model = OVModelForSequenceClassification.from_pretrained(tmp_dir)
@@ -61,3 +63,6 @@ class OVQuantizerTest(unittest.TestCase):
             tokens = tokenizer("This is a sample input", return_tensors="pt")
             outputs = model(**tokens)
             self.assertTrue("logits" in outputs)
+
+            loaded_config = OVConfig.from_pretrained(tmp_dir)
+            self.assertEqual(quantization_config.to_dict(), loaded_config.to_dict())

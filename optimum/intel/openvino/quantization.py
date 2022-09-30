@@ -14,6 +14,7 @@
 
 import inspect
 import io
+import os
 from itertools import chain
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple, Union
@@ -36,7 +37,7 @@ from nncf.torch.nncf_network import NNCFNetwork
 from openvino.runtime import Core
 from optimum.quantization_base import OptimumQuantizer
 
-from .nncf_config import get_config_with_input_info
+from .configuration import OVConfig
 from .utils import ONNX_WEIGHTS_NAME, OV_XML_FILE_NAME
 
 
@@ -76,7 +77,7 @@ class OVQuantizer(OptimumQuantizer):
 
     def quantize(
         self,
-        quantization_config: NNCFConfig,
+        quantization_config: OVConfig,
         calibration_dataset: Dataset,
         save_directory: Union[str, Path],
         file_name: Optional[str] = None,
@@ -104,7 +105,9 @@ class OVQuantizer(OptimumQuantizer):
         output_path = output_path.with_suffix(".xml").as_posix()
         calibration_dataloader = self._get_calibration_dataloader(calibration_dataset, batch_size)
         model_inputs = next(iter(calibration_dataloader))
-        nncf_config = get_config_with_input_info(quantization_config, model_inputs)
+        quantization_config.add_input_info(model_inputs)
+        quantization_config.save_pretrained(save_directory)
+        nncf_config = NNCFConfig.from_json(os.path.join(save_directory, "ov_config.json"))
         nncf_config = register_default_init_args(nncf_config, calibration_dataloader)
         controller, compressed_model = create_compressed_model(
             self.model, nncf_config, wrap_inputs_fn=wrap_nncf_model_inputs_with_objwalk
