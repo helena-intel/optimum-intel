@@ -13,9 +13,8 @@ except Exception as error:
 
 INSTALL_REQUIRES = [
     "optimum",
-    "transformers>=4.17.0",
+    "transformers>=4.20.0",
     "datasets",
-    "torch",
     "sentencepiece",
     "scipy",
 ]
@@ -29,9 +28,9 @@ QUALITY_REQUIRES = [
 ]
 
 EXTRAS_REQUIRE = {
-    "neural-compressor": "neural-compressor",
+    "neural-compressor": ["neural-compressor>=1.13.0", "torch"],
     "openvino": ["openvino>=2022.2.0"],
-    "nncf": ["nncf"],
+    "nncf": ["nncf", "torch<=1.13.*"],
     "quality": QUALITY_REQUIRES,
     "tests": TESTS_REQUIRE,
 }

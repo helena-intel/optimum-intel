@@ -1,31 +1,27 @@
 # coding=utf-8
-#  Copyright 2021 The HuggingFace Team. All rights reserved.
+# Copyright 2022 The HuggingFace Team All rights reserved.
 #
-#  Licensed under the Apache License, Version 2.0 (the "License");
-#  you may not use this file except in compliance with the License.
-#  You may obtain a copy of the License at
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-#      http://www.apache.org/licenses/LICENSE-2.0
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
-#  Unless required by applicable law or agreed to in writing, software
-#  distributed under the License is distributed on an "AS IS" BASIS,
-#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#  See the License for the specific language governing permissions and
-#  limitations under the License.
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """
-A subclass of `IncTrainer` specific to Question-Answering tasks
+A subclass of `OVTrainer` specific to Question-Answering tasks
 """
 
 from transformers.trainer_utils import PredictionOutput
-from transformers.utils import logging
 
-from optimum.intel.neural_compressor.trainer import IncTrainer
-
-
-logger = logging.get_logger(__name__)
+from optimum.intel.openvino.trainer import OVTrainer
 
 
-class QuestionAnsweringIncTrainer(IncTrainer):
+class QuestionAnsweringOVTrainer(OVTrainer):
     def __init__(self, *args, eval_examples=None, post_process_function=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.eval_examples = eval_examples
@@ -35,12 +31,6 @@ class QuestionAnsweringIncTrainer(IncTrainer):
         eval_dataset = self.eval_dataset if eval_dataset is None else eval_dataset
         eval_dataloader = self.get_eval_dataloader(eval_dataset)
         eval_examples = self.eval_examples if eval_examples is None else eval_examples
-        if hasattr(self.model, "config") and getattr(self.model.config, "torch_dtype", None) == "int8":
-            if self.model.config.framework in ["pytorch", "pytorch_fx"] and self.use_cpu_amp:
-                logger.warn(
-                    f"{self.model.config.framework} quantized model doesn't support BFloat16 input, setting `use_cpu_amp` to False."
-                )
-                self.use_cpu_amp = False
 
         # Temporarily disable metric computation, we will do it in the loop here.
         compute_metrics = self.compute_metrics
