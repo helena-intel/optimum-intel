@@ -1,0 +1,18 @@
+{
+    "algorithm": "quantization",
+    "initializer": {
+        "range": {
+            "num_init_samples": 16,
+            "type": "percentile",
+            "params": {"min_percentile": 0.01, "max_percentile": 99.99}
+        }
+    },
+    "ignored_scopes": [
+        "GPT2LMHeadModel/GPT2Model[transformer]/__add___0",
+        "{re}.*Attention\\[attn\\]/__truediv___0",
+        "{re}.*Block\\[[0-9]*\\]/__add___0",
+        "{re}.*Block\\[[0-9]*\\]/__add___1"
+    ],
+    "activations": {"mode": "symmetric"},
+    "weights": {"mode": "symmetric", "signed": true}
+}
