@@ -4,9 +4,7 @@ name: OpenVINO - Test
 
 on:
   push:
-    branches: [ main ]
   pull_request:
-    branches: [ main ]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -30,6 +28,7 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
+        pip install --pre openvino-dev
         pip install .[openvino,nncf,tests]
     - name: Test with Pytest
       run: |

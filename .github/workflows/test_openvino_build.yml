@@ -27,6 +27,8 @@ jobs:
       uses: actions/setup-python@v2
       with:
         python-version: ${{ matrix.python-version }}
+    - name: lscpu
+      run: lscpu
     - name: Clone Openvino
       run: |
         git clone https://github.com/openvinotoolkit/openvino.git
@@ -42,7 +44,8 @@ jobs:
       working-directory: ./openvino/build
     - name: Install OpenVINO wheels
       run:
-        pip install build/wheels/openvino*
+        pip install openvino*
+      working-directory: ./openvino/build/wheels
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
