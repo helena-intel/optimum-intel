@@ -27,7 +27,7 @@ from transformers.onnx.utils import get_preprocessor
 import openvino
 from huggingface_hub import HfApi, hf_hub_download
 from huggingface_hub.utils import EntryNotFoundError
-from openvino._offline_transformations import compress_model_transformation
+from openvino._offline_transformations import apply_moc_transformations, compress_model_transformation
 from optimum.exporters import TasksManager
 from optimum.exporters.onnx import export_models, get_encoder_decoder_models_for_export
 
@@ -384,13 +384,16 @@ class OVBaseModelForSeq2SeqLM(OVBaseModel):
         """
         Converts all the model weights to FP16 for more efficient inference on GPU.
         """
-        apply_moc_transformations(self.encoder_model)
-        apply_moc_transformations(self.decoder_model)
+        apply_moc_transformations(self.encoder_model, cf=False)
+        apply_moc_transformations(self.decoder_model, cf=False)
         compress_model_transformation(self.encoder_model)
         compress_model_transformation(self.decoder_model)
         if self.use_cache:
-            apply_moc_transformations(self.decoder_with_past_model)
+            apply_moc_transformations(self.decoder_with_past_model, cf=False)
             compress_model_transformation(self.decoder_with_past_model)
+        self.encoder_request = None
+        self.decoder_request = None
+        self.decoder_with_past_request = None
         return self
 
     def forward(self, *args, **kwargs):

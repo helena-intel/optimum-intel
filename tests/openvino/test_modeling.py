@@ -539,6 +539,10 @@ class OVModelForSeq2SeqLMIntegrationTest(unittest.TestCase):
         model = OVModelForSeq2SeqLM.from_pretrained(model_id, from_transformers=True, use_cache=False)
         tokenizer = AutoTokenizer.from_pretrained(model_id)
 
+        model.half()
+        model.to("CPU")
+        model.compile()
+
         # Text2Text generation
         pipe = pipeline("text2text-generation", model=model, tokenizer=tokenizer)
         text = "This is a test"
