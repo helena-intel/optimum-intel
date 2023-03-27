@@ -41,6 +41,7 @@ from transformers.modeling_outputs import (
 )
 
 import openvino
+from openvino.runtime import Tensor
 
 from ..utils.import_utils import is_transformers_version
 from .modeling_base import OVBaseModel
@@ -101,6 +102,10 @@ IMAGE_INPUTS_DOCSTRING = r"""
             Pixel values corresponding to the images in the current batch.
             Pixel values can be obtained from encoded images using [`AutoFeatureExtractor`](https://huggingface.co/docs/transformers/autoclass_tutorial#autofeatureextractor).
 """
+
+
+def _contiguous_helper(tensor: np.ndarray) -> np.ndarray:
+    return tensor if tensor.flags["C_CONTIGUOUS"] else np.ascontiguousarray(tensor)
 
 
 class OVModel(OVBaseModel):
@@ -468,18 +473,18 @@ class OVModelForCausalLM(OVModel, GenerationMixin):
         self.compile()
 
         inputs = {
-            "input_ids": np.array(input_ids),
-            "attention_mask": np.array(attention_mask),
+            "input_ids": Tensor(_contiguous_helper(np.array(input_ids)), shared_memory=False),
+            "attention_mask": Tensor(_contiguous_helper(np.array(attention_mask)), shared_memory=False),
         }
 
         # Add the token_type_ids when needed
         if "token_type_ids" in self.input_names:
-            inputs["token_type_ids"] = np.array(token_type_ids)
+            inputs["token_type_ids"] = Tensor(_contiguous_helper(np.array(token_type_ids)), shared_memory=False)
 
         # Run inference
-        outputs = self.request.infer(inputs)
-        outputs = {key.get_any_name(): value for key, value in outputs.items()}
-        logits = torch.from_numpy(outputs["logits"]).to(self.device)
+        self.request.start_async(inputs)
+        self.request.wait()
+        logits = torch.from_numpy(self.request.get_tensor("logits").data).to(self.device)
 
         return CausalLMOutputWithCrossAttentions(logits=logits)
 
