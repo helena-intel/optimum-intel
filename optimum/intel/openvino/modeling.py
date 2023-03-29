@@ -472,14 +472,17 @@ class OVModelForCausalLM(OVModel, GenerationMixin):
     ):
         self.compile()
 
+        new_input_ids = _contiguous_helper(np.array(input_ids))
+        new_attention_mask = _contiguous_helper(np.array(attention_mask))
         inputs = {
-            "input_ids": Tensor(_contiguous_helper(np.array(input_ids)), shared_memory=False),
-            "attention_mask": Tensor(_contiguous_helper(np.array(attention_mask)), shared_memory=False),
+            "input_ids": Tensor(new_input_ids, shared_memory=True),
+            "attention_mask": Tensor(new_attention_mask, shared_memory=True),
         }
 
         # Add the token_type_ids when needed
         if "token_type_ids" in self.input_names:
-            inputs["token_type_ids"] = Tensor(_contiguous_helper(np.array(token_type_ids)), shared_memory=False)
+            new_token_type_ids = _contiguous_helper(np.array(token_type_ids))
+            inputs["token_type_ids"] = Tensor(new_token_type_ids, shared_memory=True)
 
         # Run inference
         self.request.start_async(inputs)
