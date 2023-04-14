@@ -370,6 +370,7 @@ class OVDecoder:
         self.ov_config = ov_config
         self.config = config
         self.request = None
+        self.latencies = []
 
     def forward(
         self,
@@ -416,6 +417,7 @@ class OVDecoder:
         # Run inference
         self.request.start_async(inputs)
         self.request.wait()
+        self.latencies.append(self.request.latency)
 
         outputs = {
             key.get_any_name(): value.data for key, value in zip(self.request.model_outputs, self.request.outputs)
