@@ -19,7 +19,7 @@ INSTALL_REQUIRE = [
     "scipy",
 ]
 
-TESTS_REQUIRE = ["pytest", "parameterized", "Pillow", "evaluate", "diffusers", "py-cpuinfo"]
+TESTS_REQUIRE = ["pytest", "parameterized", "Pillow", "evaluate", "diffusers", "py-cpuinfo", "transformers<4.28.0"]
 
 QUALITY_REQUIRE = ["black~=23.1", "ruff>=0.0.241"]
 
