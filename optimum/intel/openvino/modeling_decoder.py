@@ -454,5 +454,9 @@ class OVDecoder:
     def _create_inference_request(self):
         if self.request is None:
             logger.info("Compiling the decoder and creating the inference request ...")
-            compiled_model = core.compile_model(self.model, self._device, self.ov_config)
-            self.request = compiled_model.create_infer_request()
+            if self.request is None:
+                # For debugging: set model_cache to the current working directory for easy debugging
+                cache_dir = "model_cache"
+                ov_config = {**self.ov_config, "CACHE_DIR": str(cache_dir), "PERFORMANCE_HINT": "LATENCY"}
+                compiled_model = core.compile_model(self.model, self._device, ov_config)
+                self.request = compiled_model.create_infer_request()
