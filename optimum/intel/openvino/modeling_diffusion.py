@@ -555,6 +555,7 @@ class OVModelTextEncoder(OVModelPart):
         model_name: str = "text_encoder",
     ):
         super().__init__(model, parent_model, ov_config, model_name)
+        self.latencies = []
 
     def __call__(self, input_ids: np.ndarray):
         self._compile()
@@ -563,6 +564,7 @@ class OVModelTextEncoder(OVModelPart):
             "input_ids": input_ids,
         }
         outputs = self.request(inputs, shared_memory=True)
+        self.latencies.append(self.request._infer_request.latency)
         return list(outputs.values())
 
 
@@ -570,6 +572,7 @@ class OVModelUnet(OVModelPart):
     def __init__(
         self, model: openvino.runtime.Model, parent_model: OVBaseModel, ov_config: Optional[Dict[str, str]] = None
     ):
+        self.latencies = []
         super().__init__(model, parent_model, ov_config, "unet")
 
     def __call__(
@@ -597,6 +600,7 @@ class OVModelUnet(OVModelPart):
             inputs["timestep_cond"] = timestep_cond
 
         outputs = self.request(inputs, shared_memory=True)
+        self.latencies.append(self.request._infer_request.latency)
         return list(outputs.values())
 
 
@@ -604,6 +608,7 @@ class OVModelVaeDecoder(OVModelPart):
     def __init__(
         self, model: openvino.runtime.Model, parent_model: OVBaseModel, ov_config: Optional[Dict[str, str]] = None
     ):
+        self.latencies = []
         super().__init__(model, parent_model, ov_config, "vae_decoder")
 
     def __call__(self, latent_sample: np.ndarray):
@@ -613,6 +618,7 @@ class OVModelVaeDecoder(OVModelPart):
             "latent_sample": latent_sample,
         }
         outputs = self.request(inputs, shared_memory=True)
+        self.latencies.append(self.request._infer_request.latency)
         return list(outputs.values())
 
     def _compile(self):
@@ -625,6 +631,7 @@ class OVModelVaeEncoder(OVModelPart):
     def __init__(
         self, model: openvino.runtime.Model, parent_model: OVBaseModel, ov_config: Optional[Dict[str, str]] = None
     ):
+        self.latencies = []
         super().__init__(model, parent_model, ov_config, "vae_encoder")
 
     def __call__(self, sample: np.ndarray):
@@ -634,6 +641,7 @@ class OVModelVaeEncoder(OVModelPart):
             "sample": sample,
         }
         outputs = self.request(inputs, shared_memory=True)
+        self.latencies.append(self.request._infer_request.latency)
         return list(outputs.values())
 
     def _compile(self):
