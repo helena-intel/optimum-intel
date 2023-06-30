@@ -138,6 +138,7 @@ class OVBaseDecoderModel(OVModel):
             self.model = self._reshape(self.model, -1, -1)
         if enable_compilation:
             self.compile()
+        self.latencies = []
 
         if use_cache ^ self.use_cache:
             raise ValueError(
@@ -387,6 +388,8 @@ class OVModelForCausalLM(OVBaseDecoderModel, GenerationMixin):
         # Run inference
         self.request.start_async(inputs, shared_memory=True)
         self.request.wait()
+        self.latencies.append(self.request.latency)
+
         logits = torch.from_numpy(self.request.get_tensor("logits").data).to(self.device)
 
         if self.use_cache:
