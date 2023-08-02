@@ -31,7 +31,8 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install .[openvino,nncf,tests,diffusers]
+        pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+        pip install .[openvino,tests]
     - name: Test with Pytest
       run: |
-        pytest tests/openvino/modeling.py -k "with_and_without"
+        pytest tests/openvino/test_modeling.py -k "with_and_without"
