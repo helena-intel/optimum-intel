@@ -136,7 +136,7 @@ class OVBaseDecoderModel(OVModel):
         self.key_value_output_names = [key for key in self.output_names if "present" in key]
         self.next_beam_idx = None
         is_stateful_supported = ensure_stateful_is_available(warn=False)
-        self.next_beam_idx = None
+        # self.next_beam_idx = None
         if self.use_cache and not self.stateful:
             logger.warn(
                 "Provided model does not contain state. It may lead to sub-optimal performance."

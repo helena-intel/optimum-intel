@@ -15,7 +15,7 @@ import logging
 import os
 from pathlib import Path
 from typing import Optional, Union
-import time
+
 import numpy as np
 import openvino
 import torch
