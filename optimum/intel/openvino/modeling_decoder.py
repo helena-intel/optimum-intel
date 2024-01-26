@@ -573,6 +573,7 @@ class OVModelForCausalLM(OVBaseDecoderModel, GenerationMixin):
         model_instance.compiled_model = self.compiled_model
         model_instance._pkv_precision = self._pkv_precision
         model_instance.request = None
+        model_instance.next_beam_idx = None
         return model_instance
 
 
