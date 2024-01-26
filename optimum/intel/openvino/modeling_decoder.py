@@ -418,7 +418,6 @@ class OVModelForCausalLM(OVBaseDecoderModel, GenerationMixin):
                 # Need a marker to differentiate the first generate iteration from the others in
                 # the first condition at the function beginning above.
                 # It should be something that is not None and it should be True when converted to Boolean.
-                past_key_values = ((),)
                 # This is the first iteration in a sequence, reset all states
                 self.request.reset_state()
                 # Set initial value for the next beam_idx input that will be used at the current iteration
@@ -459,6 +458,8 @@ class OVModelForCausalLM(OVBaseDecoderModel, GenerationMixin):
         self.request.wait()
         logits = torch.from_numpy(self.request.get_tensor("logits").data).to(self.device)
 
+        if self.stateful:
+            past_key_values = ((),)
         if not self.stateful:
             if self.use_cache:
                 # Tuple of length equal to : number of layer * number of past_key_value per decoder layer (2 corresponds to the self-attention layer)
