@@ -136,7 +136,6 @@ class OVBaseDecoderModel(OVModel):
         self.key_value_output_names = [key for key in self.output_names if "present" in key]
         self.next_beam_idx = None
         is_stateful_supported = ensure_stateful_is_available(warn=False)
-        # self.next_beam_idx = None
         if self.use_cache and not self.stateful:
             logger.warn(
                 "Provided model does not contain state. It may lead to sub-optimal performance."
@@ -570,7 +569,7 @@ class OVModelForCausalLM(OVBaseDecoderModel, GenerationMixin):
         return model_instance
 
     def clone(self):
-        model_instance = self.__class__(model=self.model, config=self.config, compile=False)
+        model_instance = self.__class__(model=self.model, config=self.config, compile=False, dynamic_shapes=False)
         model_instance.compiled_model = self.compiled_model
         model_instance._pkv_precision = self._pkv_precision
         model_instance.request = None
