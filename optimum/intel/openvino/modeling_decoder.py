@@ -569,7 +569,7 @@ class OVModelForCausalLM(OVBaseDecoderModel, GenerationMixin):
         return model_instance
 
     def clone(self):
-        model_instance = self.__class__(model=self.model, config=self.config, compile=False, dynamic_shapes=False)
+        model_instance = self.__class__(model=self.model, config=self.config, compile=False)
         model_instance.compiled_model = self.compiled_model
         model_instance._pkv_precision = self._pkv_precision
         model_instance.request = None
