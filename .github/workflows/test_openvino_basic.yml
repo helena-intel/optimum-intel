@@ -41,6 +41,8 @@ jobs:
         # Install PyTorch CPU to prevent unnecessary downloading/installing of CUDA packages
         pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
         pip install .[tests] openvino onnxruntime
+        pip install --upgrade nncf@git+https://github.com/openvinotoolkit/nncf.git@release_v2110
+        pip install --upgrade --pre openvino openvino-tokenizers  --extra-index-url https://storage.openvinotoolkit.org/simple/wheels/pre-release
 
     - name: Pip freeze
       run: pip freeze
