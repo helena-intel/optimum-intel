@@ -3,13 +3,7 @@
 name: OpenVINO - Test
 
 on:
-  push:
-    branches:
-      - main
-      - v*-release
-  pull_request:
-    branches:
-      - main
+  workflow_dispatch
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -20,13 +14,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.8", "3.12"]
-        transformers-version: ["4.36.0", "4.41.*"]
-        os: ["ubuntu-24.04"]
+        python-version: ["3.12"]
+        transformers-version: ["4.41.*"]
+    runs-on: [gasp, azure]
+    container:
+      image: cache-registry.caas.intel.com/cache/library/ubuntu:24.04
 
-    runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v4
+      with:
+        repository: "huggingface/optimum-intel"
     - name: Setup Python ${{ matrix.python-version }}
       uses: actions/setup-python@v5
       with:
@@ -43,17 +40,9 @@ jobs:
     - name: Pip freeze
       run: |
         pip freeze
+    - name: Test basic
+      run: |
+        pytest tests/openvino/test_modeling_basic.py --verbose
     - name: Test with Pytest
       run: |
         pytest tests/openvino/ --ignore tests/openvino/test_modeling_basic.py --durations=0
-    - name: Test basic
-      run: |
-        pip uninstall -y nncf
-        pytest tests/openvino/test_modeling_basic.py
-    - name: Test openvino-nightly
-      run: |
-        pip uninstall -y openvino
-        pip install openvino-nightly
-        python -c "from optimum.intel import OVModelForCausalLM; OVModelForCausalLM.from_pretrained('hf-internal-testing/tiny-random-gpt2', export=True, compile=False)"
-        optimum-cli export openvino -m hf-internal-testing/tiny-random-gpt2 gpt2-ov
-
