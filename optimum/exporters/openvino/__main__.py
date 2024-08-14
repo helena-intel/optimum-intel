@@ -100,7 +100,7 @@ def main_export(
     stateful: bool = True,
     convert_tokenizer: bool = False,
     library_name: Optional[str] = None,
-    **kwargs_shapes,
+    **loading_kwargs,
 ):
     """
     Full-suite OpenVINO export.
@@ -163,8 +163,8 @@ def main_export(
             Compression ratio between primary and backup precision (only relevant to INT4).
         stateful (`bool`, defaults to `True`):
             Produce stateful model where all kv-cache inputs and outputs are hidden in the model and are not exposed as model inputs and outputs. Applicable only for decoder models.
-        **kwargs_shapes (`Dict`):
-            Shapes to use during inference. This argument allows to override the default shapes used during the ONNX export.
+        **loading_kwargs(`Dict`):
+            Extra arguments for loading the model. Can also be used to add shapes to use during inference, to override the default shapes used during the ONNX export.
 
     Example usage:
     ```python
@@ -173,7 +173,6 @@ def main_export(
     >>> main_export("gpt2", output="gpt2_ov/")
     ```
     """
-
     if use_auth_token is not None:
         warnings.warn(
             "The `use_auth_token` argument is deprecated and will be removed soon. Please use the `token` argument instead.",
@@ -230,7 +229,16 @@ def main_export(
 
     do_gptq_patching = False
     custom_architecture = False
-    loading_kwargs = {}
+
+    if loading_kwargs is None:
+        loading_kwargs = {}
+    else:
+        loading_kwargs.pop("export", None)
+        loading_kwargs.pop("compile", None)
+        loading_kwargs.pop("ov_config", None)
+        loading_kwargs.pop("quantization_config", None)
+        loading_kwargs.pop("model_save_dir", None)
+
     if library_name == "transformers":
         config = AutoConfig.from_pretrained(
             model_name_or_path,
@@ -383,7 +391,7 @@ def main_export(
         preprocessors=preprocessors,
         device=device,
         trust_remote_code=trust_remote_code,
-        **kwargs_shapes,
+        **loading_kwargs,
     )
 
     if convert_tokenizer:
