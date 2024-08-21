@@ -419,6 +419,7 @@ class OVBaseModel(OptimizedModel):
             if "OPENVINO_LOG_LEVEL" in os.environ and int(os.environ["OPENVINO_LOG_LEVEL"]) > 2:
                 logger.info(f"{self._device} SUPPORTED_PROPERTIES:")
                 _print_compiled_model_properties(self.request)
+            self.compiled_model = self.request
 
     def _reshape(
         self,

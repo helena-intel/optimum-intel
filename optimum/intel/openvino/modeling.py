@@ -407,7 +407,8 @@ class OVModelForFeatureExtraction(OVModel):
             inputs["token_type_ids"] = token_type_ids
 
         # Run inference
-        outputs = self.request(inputs)
+        infer_request = self.compiled_model.create_infer_request()
+        outputs = infer_request.infer(inputs)
         last_hidden_state = (
             torch.from_numpy(outputs["last_hidden_state"]).to(self.device)
             if not np_inputs
