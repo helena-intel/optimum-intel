@@ -33,18 +33,25 @@ if is_nncf_available():
 logger = logging.getLogger(__name__)
 
 _DEFAULT_4BIT_CONFIGS = {
-    "databricks/dolly-v2-3b": {"bits": 4, "sym": False, "group_size": 32, "ratio": 0.5},
+    "databricks/dolly-v2-3b": {"bits": 4, "sym": False, "group_size": 128, "ratio": 0.8},
     "EleutherAI/gpt-j-6b": {"bits": 4, "sym": False, "group_size": 64},
     "facebook/opt-6.7b": {"bits": 4, "sym": False, "group_size": 64, "ratio": 0.8},
     "bigscience/bloomz-7b1": {"bits": 4, "sym": False, "group_size": 32, "ratio": 0.6},
     "togethercomputer/RedPajama-INCITE-7B-Instruct": {"bits": 4, "sym": False, "group_size": 128},
-    "HuggingFaceH4/zephyr-7b-beta": {"bits": 4, "sym": True, "group_size": 64, "ratio": 0.6},
-    "meta-llama/Llama-2-7b": {"bits": 4, "sym": True, "group_size": 128, "ratio": 0.6},
+    "HuggingFaceH4/zephyr-7b-beta": {
+        "bits": 4,
+        "sym": True,
+        "group_size": 128,
+        "ratio": 0.8,
+        "dataset": "wikitext2",
+        "awq": True,
+    },
+    "meta-llama/Llama-2-7b": {"bits": 4, "sym": True, "group_size": 128, "ratio": 0.7},
     "meta-llama/Llama-2-7b-chat": {"bits": 4, "sym": True, "group_size": 128, "ratio": 0.8},
     "meta-llama/Llama-2-13b-chat": {"bits": 4, "sym": True, "group_size": 64, "ratio": 0.8},
     "stabilityai/stablelm-3b-4e1t": {"bits": 4, "sym": True, "group_size": 64, "ratio": 0.8},
     "stablelm-epoch-3b-preview": {"bits": 4, "sym": True, "group_size": 64, "ratio": 0.8},
-    "stable-zephyr-3b-dpo": {"bits": 4, "sym": False, "group_size": 64, "ratio": 0.8},
+    "stabilityai/stablelm-zephyr-3b": {"bits": 4, "sym": False, "group_size": 128, "ratio": 1.0},
     "pansophic/rocket-3B": {"bits": 4, "sym": True, "group_size": 128, "ratio": 0.8},
     "THUDM/chatglm2-6b": {"bits": 4, "sym": True, "group_size": 128, "ratio": 0.72},
     "Qwen/Qwen-7B-Chat": {"bits": 4, "sym": True, "group_size": 128, "ratio": 0.6},
@@ -52,11 +59,25 @@ _DEFAULT_4BIT_CONFIGS = {
     "tiiuae/falcon-7b": {"bits": 4, "sym": True, "group_size": 64, "all_layers": True},
     "psmathur/orca_mini_3b": {"bits": 4, "sym": True, "group_size": 64, "all_layers": True},
     "mistralai/Mixtral-8x7B-v0.1": {"bits": 4, "sym": True, "group_size": 128, "ratio": 0.8},
+    "facebook/opt-2.7b": {"bits": 4, "sym": True, "group_size": 128, "ratio": 0.7},
+    "togethercomputer/RedPajama-INCITE-Chat-3B-v1": {"bits": 4, "sym": False, "group_size": 128, "ratio": 0.8},
+    "lmsys/vicuna-7b-v1.5": {"bits": 4, "sym": False, "group_size": 128, "ratio": 1.0},
+    "stabilityai/stablelm-tuned-alpha-3b": {"bits": 4, "sym": False, "group_size": 128, "ratio": 0.8},
+    "mistralai/Mistral-7B-v0.1": {"bits": 4, "sym": True, "group_size": 128, "ratio": 0.9},
+    "baichuan-inc/Baichuan2-7B-Chat": {
+        "bits": 4,
+        "sym": True,
+        "group_size": 128,
+        "ratio": 0.8,
+        "dataset": "wikitext2",
+        "awq": True,
+    },
 }
 
 
 class OVQuantizationMethod(str, Enum):
     DEFAULT = "default"
+    HYBRID = "hybrid"
 
 
 @dataclass
@@ -133,7 +154,7 @@ class OVWeightQuantizationConfig(OVQuantizationConfigBase):
                     using the [`~PreTrainedTokenizer.save_pretrained`] method, e.g., `./my_model_directory/`.
         dataset (`str or List[str]`, *optional*):
             The dataset used for data-aware compression or quantization with NNCF. You can provide your own dataset
-            in a list of strings or just use the one from the list ['wikitext','c4','c4-new','ptb','ptb-new'] for LLLMs
+            in a list of strings or just use the one from the list ['wikitext2','c4','c4-new','ptb','ptb-new'] for LLLMs
             or ['conceptual_captions','laion/220k-GPT4Vision-captions-from-LIVIS','laion/filtered-wit'] for diffusion models.
             Alternatively, you can provide data objects via `calibration_dataset` argument
             of `OVQuantizer.quantize()` method.
@@ -194,7 +215,7 @@ class OVWeightQuantizationConfig(OVQuantizationConfigBase):
                 f"If you wish to provide a custom dataset, please use the `OVQuantizer` instead."
             )
         if self.dataset is not None and isinstance(self.dataset, str):
-            llm_datasets = ["wikitext", "c4", "c4-new", "ptb", "ptb-new"]
+            llm_datasets = ["wikitext2", "c4", "c4-new", "ptb", "ptb-new"]
             stable_diffusion_datasets = [
                 "conceptual_captions",
                 "laion/220k-GPT4Vision-captions-from-LIVIS",
@@ -310,7 +331,9 @@ class OVConfig(BaseConfig):
         if isinstance(quantization_config, dict):
             quantization_config = self._quantization_config_from_dict(quantization_config)
         self.quantization_config = quantization_config
-        self.compression = None  # A field for backward-compatability of training-time compression parameters
+        self.compression = kwargs.get(
+            "compression", None
+        )  # A field for backward-compatability of training-time compression parameters
         bits = self.quantization_config.bits if self.quantization_config else None
         self.dtype = "int" + str(bits) if isinstance(bits, int) else dtype
 
