@@ -14,45 +14,54 @@
 
 import functools
 import gc
-import inspect
 import logging
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
 
 import onnx
+from transformers.generation import GenerationMixin
 from transformers.utils import is_tf_available, is_torch_available
 
-from openvino.runtime import Model, PartialShape, save_model
+from openvino.runtime import Model, save_model
 from openvino.runtime.exceptions import OVTypeError
-from openvino.runtime.utils.types import get_element_type
 from openvino.tools.ovc import convert_model
 from optimum.exporters import TasksManager
 from optimum.exporters.onnx.base import OnnxConfig
 from optimum.exporters.onnx.convert import check_dummy_inputs_are_allowed
 from optimum.exporters.onnx.convert import export_pytorch as export_pytorch_to_onnx
 from optimum.exporters.onnx.convert import export_tensorflow as export_tensorflow_onnx
-from optimum.exporters.utils import _get_submodels_and_export_configs
+from optimum.exporters.utils import _get_submodels_and_export_configs as _default_get_submodels_and_export_configs
 from optimum.intel.utils.import_utils import (
     _nncf_version,
+    _open_clip_version,
     _optimum_intel_version,
     _optimum_version,
     _timm_version,
     _torch_version,
     _transformers_version,
+    compare_versions,
+    is_tokenizers_version,
+    is_transformers_version,
 )
 from optimum.utils import DEFAULT_DUMMY_SHAPES, is_diffusers_available
 from optimum.utils.save_utils import maybe_save_preprocessors
 
 from ...intel.utils.import_utils import is_nncf_available
+from ...intel.utils.modeling_utils import _infer_library_from_model_or_model_class
 from .model_patcher import patch_model_with_bettertransformer
-from .stateful import ensure_export_task_support_stateful, ensure_stateful_is_available, patch_stateful
+from .stateful import (
+    ensure_export_task_support_stateful,
+    ensure_model_type_support_stateful,
+    ensure_stateful_is_available,
+    patch_stateful,
+)
 from .utils import (
-    _MAX_UNCOMPRESSED_SIZE,
+    MULTI_MODAL_TEXT_GENERATION_MODELS,
     OV_XML_FILE_NAME,
+    _get_input_info,
+    _get_open_clip_submodels_fn_and_export_configs,
     clear_class_registry,
-    flattenize_inputs,
-    get_input_shapes,
     remove_none_from_dummy_inputs,
 )
 
@@ -64,7 +73,7 @@ if is_torch_available():
     from transformers.modeling_utils import PreTrainedModel
 
 if is_diffusers_available():
-    from diffusers import ModelMixin
+    from diffusers import DiffusionPipeline, ModelMixin
 
 if is_tf_available():
     from transformers.modeling_tf_utils import TFPreTrainedModel
@@ -74,29 +83,14 @@ if TYPE_CHECKING:
     from optimum.intel.openvino.configuration import OVConfig
 
 
-def _save_model(model, path: str, ov_config: Optional["OVConfig"] = None):
-    compress_to_fp16 = False
-
-    if ov_config is not None:
-        if ov_config.quantization_config:
-            if not is_nncf_available():
-                raise ImportError(
-                    "Quantization of the weights to int8 requires nncf, please install it with `pip install nncf`"
-                )
-
-            from optimum.intel.openvino.quantization import _weight_only_quantization
-
-            _weight_only_quantization(model, ov_config.quantization_config)
-
-        compress_to_fp16 = ov_config.dtype == "fp16"
-
-    library_name = TasksManager.infer_library_from_model(Path(path).parent)
+def _save_model(model, path: str, ov_config: Optional["OVConfig"] = None, library_name: Optional[str] = None):
+    compress_to_fp16 = ov_config is not None and ov_config.dtype == "fp16"
     model = _add_version_info_to_model(model, library_name)
     save_model(model, path, compress_to_fp16)
 
 
 def export(
-    model: Union["PreTrainedModel", "TFPreTrainedModel", "ModelMixin"],
+    model: Union["PreTrainedModel", "TFPreTrainedModel", "ModelMixin", "DiffusionPipeline"],
     config: OnnxConfig,
     output: Path,
     opset: Optional[int] = None,
@@ -105,6 +99,8 @@ def export(
     model_kwargs: Optional[Dict[str, Any]] = None,
     ov_config: Optional["OVConfig"] = None,
     stateful: bool = True,
+    patch_16bit_model: bool = False,
+    library_name: Optional[str] = None,
 ) -> Tuple[List[str], List[str]]:
     """
     Exports a Pytorch or TensorFlow model to an OpenVINO Intermediate Representation.
@@ -139,7 +135,7 @@ def export(
         )
 
     if "diffusers" in str(model.__class__) and not is_diffusers_available():
-        raise ImportError("The pip package `diffusers` is required to export stable diffusion models to ONNX.")
+        raise ImportError("The package `diffusers` is required to export diffusion models to OpenVINO.")
 
     if stateful:
         # This will be checked anyway after the model conversion, but checking it earlier will save time for a user if not suitable version is used
@@ -156,6 +152,8 @@ def export(
             ov_config=ov_config,
             model_kwargs=model_kwargs,
             stateful=stateful,
+            patch_16bit_model=patch_16bit_model,
+            library_name=library_name,
         )
 
     elif is_tf_available() and issubclass(type(model), TFPreTrainedModel):
@@ -166,7 +164,7 @@ def export(
             raise RuntimeError("`tf2onnx` does not support export on CUDA device.")
         if input_shapes is not None:
             logger.info("`input_shapes` argument is not supported by the Tensorflow ONNX export and will be ignored.")
-        return export_tensorflow(model, config, opset, output, ov_config=ov_config)
+        return export_tensorflow(model, config, opset, output, ov_config=ov_config, library_name=library_name)
 
     else:
         raise RuntimeError(
@@ -180,6 +178,7 @@ def export_tensorflow(
     opset: int,
     output: Path,
     ov_config: Optional["OVConfig"] = None,
+    library_name: Optional[str] = None,
 ):
     """
     Export the TensorFlow model to OpenVINO format.
@@ -198,7 +197,15 @@ def export_tensorflow(
     onnx_path = Path(output).with_suffix(".onnx")
     input_names, output_names = export_tensorflow_onnx(model, config, opset, onnx_path)
     ov_model = convert_model(str(onnx_path))
-    _save_model(ov_model, output.parent / output, ov_config=ov_config)
+
+    library_name = _infer_library_from_model_or_model_class(model=model, library_name=library_name)
+
+    _save_model(
+        ov_model,
+        output.parent / output,
+        ov_config=ov_config,
+        library_name=library_name,
+    )
     return input_names, output_names, True
 
 
@@ -211,6 +218,7 @@ def export_pytorch_via_onnx(
     input_shapes: Optional[Dict] = None,
     model_kwargs: Optional[Dict[str, Any]] = None,
     ov_config: Optional["OVConfig"] = None,
+    library_name: Optional[str] = None,
 ):
     """
     Exports a PyTorch model to an OpenVINO Intermediate Representation via ONNX export.
@@ -251,7 +259,15 @@ def export_pytorch_via_onnx(
     )
     torch.onnx.export = orig_torch_onnx_export
     ov_model = convert_model(str(onnx_output))
-    _save_model(ov_model, output.parent / OV_XML_FILE_NAME if output.suffix != ".xml" else output, ov_config=ov_config)
+
+    library_name = _infer_library_from_model_or_model_class(model=model, library_name=library_name)
+
+    _save_model(
+        ov_model,
+        output.parent / OV_XML_FILE_NAME if output.suffix != ".xml" else output,
+        ov_config=ov_config,
+        library_name=library_name,
+    )
     return input_names, output_names, True
 
 
@@ -265,6 +281,8 @@ def export_pytorch(
     model_kwargs: Optional[Dict[str, Any]] = None,
     ov_config: Optional["OVConfig"] = None,
     stateful: bool = False,
+    patch_16bit_model: bool = False,
+    library_name: Optional[str] = None,
 ) -> Tuple[List[str], List[str]]:
     """
     Exports a PyTorch model to an OpenVINO Intermediate Representation.
@@ -310,8 +328,9 @@ def export_pytorch(
         #       this function is one of the _internal_ steps in a bigger model conversion pipeline.
 
     with torch.no_grad():
-        model.config.torchscript = False
-        model.config.return_dict = True
+        if hasattr(model, "config"):
+            model.config.torchscript = False
+            model.config.return_dict = True
         model.eval()
 
         # Check if we need to override certain configuration item
@@ -357,14 +376,17 @@ def export_pytorch(
             patcher.patched_forward = ts_patched_forward
 
             with patcher:
-                check_dummy_inputs_are_allowed(model, dummy_inputs)
-                sig = inspect.signature(model.forward) if hasattr(model, "forward") else inspect.signature(model.call)
-                inputs = config.ordered_inputs(model)
-                input_names = list(inputs.keys())
-                output_names = list(config.outputs.keys())
-                input_info = get_input_shapes(dummy_inputs, inputs)
+                if patch_16bit_model:
+                    from openvino.frontend.pytorch.patch_model import __make_16bit_traceable
 
-                ov_model = convert_model(model, example_input=dummy_inputs, input=input_info)
+                    __make_16bit_traceable(model)
+                check_dummy_inputs_are_allowed(model, dummy_inputs)
+                input_info = _get_input_info(model, config, dummy_inputs)
+                ov_model = convert_model(
+                    model,
+                    example_input=dummy_inputs,
+                    input=[(item.shape, item.type) for item in input_info],
+                )
 
         except Exception as ex:
             logger.warning(f"Export model to OpenVINO directly failed with: \n{ex}.\nModel will be exported to ONNX")
@@ -372,11 +394,18 @@ def export_pytorch(
             if stateful:
                 # cannot raise because stateful is enabled by default and it would break backward compatibility for models that couldn't convert to OV directly
                 # TODO: Implement stateful for ONNX path as well, not doing it right now because of lack of validation
-                logger.warn(
+                logger.warning(
                     "[ WARNING ] Making stateful models is not supported when exporting to ONNX as an intermediate step. "
                     "A stateless model will be exported instead. It may result in sub-optimal inference performance."
                     "Provide a model that can be converted to OpenVINO without fallback to ONNX conversion path."
                 )
+
+            if patch_16bit_model:
+                from openvino.frontend.pytorch.patch_model import unpatch_model
+
+                unpatch_model(model, "_openvino_module_extension_patch_orig_forward")
+                model.to(torch.float32)
+
             return export_pytorch_via_onnx(
                 model,
                 config,
@@ -386,34 +415,32 @@ def export_pytorch(
                 input_shapes,
                 model_kwargs,
                 ov_config=ov_config,
+                library_name=library_name,
             )
 
-        ordered_dummy_inputs = {param: dummy_inputs[param] for param in sig.parameters if param in dummy_inputs}
-        if not ordered_dummy_inputs:
-            ordered_dummy_inputs = dummy_inputs
-        ordered_input_names = list(inputs)
-        flatten_inputs = flattenize_inputs(ordered_dummy_inputs.values())
-        ov_model.validate_nodes_and_infer_types()
+        ov_model.validate_nodes_and_infer_types()  # TODO: remove as unnecessary validation?
+
+        output_names = list(config.outputs.keys())
         for idx, out_tensor in enumerate(ov_model.outputs):
             if idx < len(output_names):
                 out_tensor.get_tensor().set_names({output_names[idx]})
 
+        input_names = [item.name for item in input_info]
         for idx, inp_tensor in enumerate(ov_model.inputs):
-            input_name = ordered_input_names[idx]
+            input_name = input_names[idx]
             inp_tensor.get_tensor().set_names({input_name})
-            inp_data = flatten_inputs[idx]
-            static_shape = PartialShape(inp_data.shape)
-            dims = inputs.get(input_name, [])
-            for dim in dims:
-                static_shape[dim] = -1
-            inp_tensor.get_node().set_partial_shape(static_shape)
-            inp_tensor.get_node().set_element_type(get_element_type(inp_data.cpu().numpy().dtype))
-        ov_model.validate_nodes_and_infer_types()
 
         if stateful:
             patch_stateful(model.config, ov_model)
 
-        _save_model(ov_model, output, ov_config=ov_config)
+        library_name = _infer_library_from_model_or_model_class(model=model, library_name=library_name)
+
+        _save_model(
+            ov_model,
+            output,
+            ov_config=ov_config,
+            library_name=library_name,
+        )
         clear_class_registry()
         del model
         gc.collect()
@@ -422,7 +449,7 @@ def export_pytorch(
 
 def export_models(
     models_and_export_configs: Dict[
-        str, Tuple[Union["PreTrainedModel", "TFPreTrainedModel", "ModelMixin"], "OnnxConfig"]
+        str, Tuple[Union["PreTrainedModel", "TFPreTrainedModel", "ModelMixin", "DiffusionPipeline"], "OnnxConfig"]
     ],
     output_dir: Path,
     opset: Optional[int] = None,
@@ -432,6 +459,8 @@ def export_models(
     model_kwargs: Optional[Dict[str, Any]] = None,
     ov_config: Optional["OVConfig"] = None,
     stateful: bool = True,
+    patch_16bit_model: bool = False,
+    library_name: Optional[str] = None,
 ) -> Tuple[List[List[str]], List[List[str]]]:
     """
     Export the models to OpenVINO IR format
@@ -482,7 +511,9 @@ def export_models(
                 input_shapes=input_shapes,
                 model_kwargs=model_kwargs,
                 ov_config=ov_config,
-                stateful=stateful,
+                stateful=stateful[i] if isinstance(stateful, (list, tuple)) else stateful,
+                patch_16bit_model=patch_16bit_model,
+                library_name=library_name,
             )
         )
 
@@ -491,7 +522,7 @@ def export_models(
 
 
 def export_from_model(
-    model: Union["PreTrainedModel", "TFPreTrainedModel"],
+    model: Union["PreTrainedModel", "TFPreTrainedModel", "ModelMixin", "DiffusionPipeline"],
     output: Union[str, Path],
     task: Optional[str] = None,
     ov_config: Optional["OVConfig"] = None,
@@ -503,16 +534,19 @@ def export_from_model(
     preprocessors: List = None,
     device: str = "cpu",
     trust_remote_code: bool = False,
+    patch_16bit_model: bool = False,
     **kwargs_shapes,
 ):
+    model_kwargs = model_kwargs or {}
+
     if ov_config is not None and ov_config.quantization_config and not is_nncf_available():
         raise ImportError(
             f"Compression of the weights to {ov_config.quantization_config} requires nncf, please install it with `pip install nncf`"
         )
 
-    model_kwargs = model_kwargs or {}
-    library_name = TasksManager._infer_library_from_model(model)
-    TasksManager.standardize_model_attributes(model, library_name)
+    library_name = _infer_library_from_model_or_model_class(model)
+    if library_name != "open_clip":
+        TasksManager.standardize_model_attributes(model)
 
     if hasattr(model.config, "export_model_type"):
         model_type = model.config.export_model_type.replace("_", "-")
@@ -521,7 +555,7 @@ def export_from_model(
 
     custom_architecture = library_name == "transformers" and model_type not in TasksManager._SUPPORTED_MODEL_TYPE
 
-    if task is not None:
+    if task is not None and task != "auto":
         task = TasksManager.map_from_synonym(task)
     else:
         try:
@@ -542,8 +576,10 @@ def export_from_model(
 
         logger.info(f"Automatic task detection to: {task}.")
 
-    stateful = stateful and ensure_export_task_support_stateful(task)
-
+    stateful = stateful and (
+        ensure_export_task_support_stateful(task)
+        or ensure_model_type_support_stateful(getattr(getattr(model, "config", {}), "model_type", ""))
+    )
     # TODO: support onnx_config.py in the model repo
     if custom_architecture and custom_export_configs is None:
         raise ValueError(
@@ -573,8 +609,14 @@ def export_from_model(
             kwargs_shapes[input_name] if input_name in kwargs_shapes else DEFAULT_DUMMY_SHAPES[input_name]
         )
 
+    if library_name == "open_clip":
+        custom_architecture = True
+        custom_export_configs, fn_get_submodels = _get_open_clip_submodels_fn_and_export_configs(
+            model, library_name, task, preprocessors, custom_export_configs, fn_get_submodels
+        )
+
     logging.disable(logging.INFO)
-    export_config, models_and_export_configs = _get_submodels_and_export_configs(
+    export_config, models_and_export_configs, stateful_submodels = _get_submodels_and_export_configs(
         model=model,
         task=task,
         monolith=False,
@@ -587,29 +629,32 @@ def export_from_model(
         _variant="default",
         legacy=False,
         exporter="openvino",
+        stateful=stateful,
     )
     logging.disable(logging.NOTSET)
 
-    if ov_config is None:
-        if library_name == "diffusers":
-            num_parameters = model.unet.num_parameters()
-        else:
-            num_parameters = sum(param.numel() for param in list(model.parameters()) if param.requires_grad)
+    if library_name == "open_clip":
+        if hasattr(model.config, "save_pretrained"):
+            model.config.save_pretrained(output)
 
-        if num_parameters >= _MAX_UNCOMPRESSED_SIZE:
-            if is_nncf_available():
-                from ...intel.openvino.configuration import OVConfig
+        for preprocess in preprocessors:
+            if hasattr(preprocess, "save_pretrained"):
+                preprocess.save_pretrained(output)
 
-                ov_config = OVConfig(quantization_config={"bits": 8})
-
-                logger.info("The model weights will be quantized to int8.")
-            else:
+        files_subpaths = ["openvino_" + model_name + ".xml" for model_name in models_and_export_configs.keys()]
+    elif library_name != "diffusers":
+        if is_transformers_version(">=", "4.44.99"):
+            misplaced_generation_parameters = model.config._get_non_default_generation_parameters()
+            if isinstance(model, GenerationMixin) and len(misplaced_generation_parameters) > 0:
                 logger.warning(
-                    "The model will be converted with no weights quantization. Quantization of the weights to int8 requires nncf."
-                    "please install it with `pip install nncf`"
+                    "Moving the following attributes in the config to the generation config: "
+                    f"{misplaced_generation_parameters}. You are seeing this warning because you've set "
+                    "generation parameters in the model config, as opposed to in the generation config.",
                 )
+                for param_name, param_value in misplaced_generation_parameters.items():
+                    setattr(model.generation_config, param_name, param_value)
+                    setattr(model.config, param_name, None)
 
-    if library_name != "diffusers":
         # Saving the model config and preprocessor as this is needed sometimes.
         model.config.save_pretrained(output)
         generation_config = getattr(model, "generation_config", None)
@@ -661,16 +706,21 @@ def export_from_model(
         input_shapes=input_shapes,
         device=device,
         ov_config=ov_config,
-        stateful=stateful,
+        stateful=stateful_submodels,
         opset=opset,
         model_kwargs=model_kwargs,
+        patch_16bit_model=patch_16bit_model,
+        library_name=library_name,
     )
+
+    return files_subpaths
 
 
 def export_tokenizer(
     tokenizer,
     output: Union[str, Path],
     suffix: Optional[str] = "",
+    task: Optional[str] = None,
 ):
     # avoid circular imports
     from optimum.intel.openvino import OV_DETOKENIZER_NAME, OV_TOKENIZER_NAME
@@ -681,11 +731,26 @@ def export_tokenizer(
     except ModuleNotFoundError:
         return
 
+    if is_tokenizers_version(">", "0.19"):
+        logger.warning(
+            "Exporting tokenizers to OpenVINO is not supported for tokenizers version > 0.19. "
+            "Please downgrade to tokenizers version <= 0.19 to export tokenizers to OpenVINO."
+        )
+
     if not isinstance(output, Path):
         output = Path(output)
 
     if output.exists():
         tokenizer = maybe_convert_tokenizer_to_fast(tokenizer, output)
+
+    if (
+        task is not None
+        and task.startswith("text-generation")
+        and compare_versions("openvino-tokenizers", ">=", "2024.3.0.0")
+    ):
+        logger.info(f"Set tokenizer padding side to left for `{task}` task.")
+        tokenizer.padding_side = "left"
+        tokenizer.truncation_side = "left"
 
     try:
         converted = convert_tokenizer(tokenizer, with_detokenizer=True)
@@ -726,6 +791,8 @@ def _add_version_info_to_model(model: Model, library_name: Optional[str] = None)
             model.set_rt_info(_optimum_version, ["optimum", "diffusers_version"])
         elif library_name == "timm":
             model.set_rt_info(_timm_version, ["optimum", "timm_version"])
+        elif library_name == "open_clip":
+            model.set_rt_info(_open_clip_version, ["optimum", "open_clip_version"])
         rt_info = model.get_rt_info()
         if "nncf" in rt_info:
             model.set_rt_info(_nncf_version, ["optimum", "nncf_version"])
@@ -737,3 +804,84 @@ def _add_version_info_to_model(model: Model, library_name: Optional[str] = None)
         pass
 
     return model
+
+
+def _get_multi_modal_submodels_and_export_configs(
+    model: Union["PreTrainedModel", "TFPreTrainedModel"],
+    task: str,
+    library_name: str,
+    int_dtype: str,
+    float_dtype: str,
+    preprocessors: Optional[List[Any]] = None,
+    model_kwargs: Optional[Dict] = None,
+    stateful: bool = True,
+):
+    models_for_export = {}
+    stateful_parts = []
+
+    model_type = model.config.model_type.replace("_", "-")
+
+    if model_type == "internvl-chat" and preprocessors is not None:
+        model.config.img_context_token_id = preprocessors[0].convert_tokens_to_ids("<IMG_CONTEXT>")
+
+    if hasattr(model, "image_newline"):
+        model.config.image_newline = model.image_newline.tolist()
+    main_config_cls = TasksManager.get_exporter_config_constructor(
+        model=model, task=task, exporter="openvino", library_name=library_name
+    )
+    main_config = main_config_cls(
+        model.config, int_dtype=int_dtype, float_dtype=float_dtype, preprocessors=preprocessors
+    )
+    for behavior in main_config.SUPPORTED_BEHAVIORS:
+        model_id = f"{behavior}_model"
+        model_part_config = main_config.with_behavior(behavior)
+        model_part = main_config.get_model_for_behavior(model, behavior)
+        models_for_export[model_id] = (model_part, model_part_config)
+        stateful_parts.append(stateful if getattr(model_part_config, "use_past", False) else False)
+    return main_config, models_for_export, stateful_parts
+
+
+def _get_submodels_and_export_configs(
+    model: Union["PreTrainedModel", "TFPreTrainedModel", "DiffusionPipeline"],
+    task: str,
+    monolith: bool,
+    custom_export_configs: Dict,
+    custom_architecture: bool,
+    _variant: str,
+    library_name: str,
+    int_dtype: str = "int64",
+    float_dtype: str = "fp32",
+    fn_get_submodels: Optional[Callable] = None,
+    preprocessors: Optional[List[Any]] = None,
+    legacy: bool = False,
+    model_kwargs: Optional[Dict] = None,
+    exporter: str = "openvino",
+    stateful: bool = False,
+):
+    if (
+        not custom_architecture
+        and library_name == "transformers"
+        and model.config.model_type.replace("_", "-") in MULTI_MODAL_TEXT_GENERATION_MODELS
+    ):
+        return _get_multi_modal_submodels_and_export_configs(
+            model, task, library_name, int_dtype, float_dtype, preprocessors, model_kwargs, stateful
+        )
+
+    export_config, models_for_export = _default_get_submodels_and_export_configs(
+        model,
+        task,
+        monolith,
+        custom_export_configs,
+        custom_architecture,
+        _variant,
+        library_name,
+        int_dtype,
+        float_dtype,
+        fn_get_submodels,
+        preprocessors,
+        legacy,
+        model_kwargs,
+        exporter,
+    )
+    stateful_per_model = [stateful] * len(models_for_export)
+    return export_config, models_for_export, stateful_per_model
