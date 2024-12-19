@@ -43,6 +43,7 @@ jobs:
           pip install --upgrade pip
           pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
           pip install .[openvino,tests] transformers[testing]
+          pip install --pre -U openvino --extra-index-url https://storage.openvinotoolkit.org/simple/wheels/pre-release
           pip uninstall -y nncf
 
       - if: ${{ matrix.transformers-version != 'latest' }}
