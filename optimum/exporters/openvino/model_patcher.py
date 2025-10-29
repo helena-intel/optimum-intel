@@ -6521,3 +6521,69 @@ class Qwen3MoeModelPatcher(OVDecoderModelPatcher):
 
         if is_transformers_version(">=", "4.53"):
             Qwen3MoeSparseMoeBlock.forward = self.original_moe_forward
+
+
+class DotsOCRVisionEmbeddingsPatcher(ModelPatcher):
+    def __init__(
+        self,
+        config: "OnnxConfig",
+        model: Union["PreTrainedModel", "TFPreTrainedModel"],
+        model_kwargs: Optional[Dict[str, Any]] = None,
+    ):
+        super().__init__(config, model, model_kwargs)
+
+    def __enter__(self):
+        super().__enter__()
+        # Patch the vision tower forward method to rename parameters and set bf16=False
+        original_forward = self._model.forward
+        
+        def patched_forward(pixel_values, grid_thw):
+            # Rename pixel_values to hidden_states and call with bf16=False
+            return original_forward(hidden_states=pixel_values, grid_thw=grid_thw, bf16=False)
+        
+        self._original_forward = original_forward
+        self._model.forward = patched_forward
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        super().__exit__(exc_type, exc_value, traceback)
+        self._model.forward = self._original_forward
+
+
+class DotsOCRLanguageModelPatcher(OVDecoderModelPatcher):
+    def __init__(
+        self,
+        config: "OnnxConfig",
+        model: "PreTrainedModel",
+        model_kwargs: Dict[str, Any] = None,
+    ):
+        model.__orig_forward = model.forward
+
+        def forward_wrap(
+            self,
+            attention_mask,
+            position_ids=None,
+            past_key_values=None,
+            inputs_embeds=None,
+            input_ids=None,
+            use_cache=True,
+        ):
+            new_past_key_values = DynamicCache.from_legacy_cache(past_key_values)
+            result = self.__orig_forward(
+                input_ids=input_ids if input_ids is not None else torch.zeros((inputs_embeds.shape[0], inputs_embeds.shape[1]), dtype=torch.long, device=inputs_embeds.device),
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_values=new_past_key_values,
+                inputs_embeds=inputs_embeds,
+                use_cache=use_cache,
+            )
+            if past_key_values is not None:
+                result["past_key_values"] = result["past_key_values"].to_legacy_cache()
+            return result
+
+        model.forward = types.MethodType(forward_wrap, model)
+        super().__init__(config, model, model_kwargs)
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        super().__exit__(exc_type, exc_value, traceback)
+        self._model.forward = self._model.__orig_forward

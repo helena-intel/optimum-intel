@@ -4414,6 +4414,76 @@ class _OVLlama4ForCausalLM(OVModelForVisualCausalLM):
         return inputs
 
 
+class _OVDotsOCRForCausalLM(OVModelForVisualCausalLM):
+    def get_vision_embeddings(self, pixel_values, image_grid_thw, input_ids, **kwargs):
+        if input_ids is not None and input_ids.shape[1] == 1 and kwargs.get("past_key_values") is not None:
+            return None
+        
+        # If pixel_values is already a sequence of vision embeddings [seq_len, hidden_size],
+        # bypass the vision_embeddings model and use it directly.
+        if len(pixel_values.shape) == 2:
+            return pixel_values
+        
+        # Pass grid_thw as a keyword argument
+        return self.vision_embeddings(pixel_values, grid_thw=image_grid_thw).last_hidden_state
+
+    def merge_vision_text_embeddings(
+        self, vision_embeds, inputs_embeds, input_ids=None, attention_mask=None, position_ids=None, **kwargs
+    ):
+        # Merge vision embeddings into text embeddings at image token positions
+        vision_embeds = torch.from_numpy(vision_embeds) if isinstance(vision_embeds, np.ndarray) else vision_embeds
+        inputs_embeds = torch.from_numpy(inputs_embeds) if isinstance(inputs_embeds, np.ndarray) else inputs_embeds
+        
+        # Create mask for image tokens
+        img_mask = (input_ids == self.config.image_token_id).unsqueeze(-1).expand_as(inputs_embeds)
+        
+        # Verify dimensions match
+        n_image_tokens = img_mask.sum() // inputs_embeds.shape[-1]
+        n_vision_embeds = vision_embeds.shape[0]
+        
+        if n_image_tokens != n_vision_embeds:
+            # Truncate if needed
+            if n_image_tokens > n_vision_embeds:
+                # Truncate mask
+                flat_mask = img_mask.view(-1)
+                true_indices = torch.nonzero(flat_mask).squeeze()
+                true_indices = true_indices[:n_vision_embeds * inputs_embeds.shape[-1]]
+                new_flat_mask = torch.zeros_like(flat_mask)
+                new_flat_mask[true_indices] = True
+                img_mask = new_flat_mask.view_as(img_mask)
+        
+        # Scatter vision embeddings into text embeddings
+        inputs_embeds = inputs_embeds.masked_scatter(
+            img_mask.to(inputs_embeds.device),
+            vision_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
+        )
+        
+        return inputs_embeds, attention_mask, position_ids
+
+    @staticmethod
+    def preprocess_inputs(
+        text: Optional[str] = None,
+        image: Optional["Image"] = None,
+        processor: Optional[AutoImageProcessor] = None,
+        tokenizer: Optional[PreTrainedTokenizer] = None,
+        config: Optional[PretrainedConfig] = None,
+        video: Optional["VideoInput"] = None,
+        audio: Optional[np.ndarray] = None,
+    ):
+        if processor is None:
+            raise ValueError("processor is required")
+        if video is not None:
+            raise ValueError("Video input is not supported")
+        if audio is not None:
+            raise ValueError("Audio input is not supported")
+        if image is None:
+            raise ValueError("Image is required")
+        
+        # Process image and text
+        processed_inputs = processor(images=image, text=text, return_tensors="pt")
+        return processed_inputs
+
+
 MODEL_TYPE_TO_CLS_MAPPING = {
     "llava": _OVLlavaForCausalLM,
     "llava_next": _OVLlavaNextForCausalLM,
@@ -4433,4 +4503,5 @@ MODEL_TYPE_TO_CLS_MAPPING = {
     "phi4_multimodal": _OVPhi4MMForCausalLM,
     "llama4": _OVLlama4ForCausalLM,
     "minicpmo": _OVMiniCPMOForCausalLM,
+    "dots_ocr": _OVDotsOCRForCausalLM,
 }

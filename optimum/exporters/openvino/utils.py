@@ -235,6 +235,7 @@ MULTI_MODAL_TEXT_GENERATION_MODELS = [
     "phi4_multimodal",
     "llama4",
     "minicpmo",
+    "dots_ocr",
 ]
 
 SSM_MODELS = ["mamba", "falcon_mamba"]
