@@ -6568,15 +6568,33 @@ class DotsOCRLanguageModelPatcher(OVDecoderModelPatcher):
             input_ids=None,
             use_cache=True,
         ):
-            new_past_key_values = DynamicCache.from_legacy_cache(past_key_values)
-            result = self.__orig_forward(
-                input_ids=input_ids if input_ids is not None else torch.zeros((inputs_embeds.shape[0], inputs_embeds.shape[1]), dtype=torch.long, device=inputs_embeds.device),
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-                past_key_values=new_past_key_values,
-                inputs_embeds=inputs_embeds,
-                use_cache=use_cache,
-            )
+            # DotsOCR requires input_ids even when inputs_embeds is provided
+            # because it needs to know where image tokens are for proper merging
+            # If input_ids not provided, we skip prepare_inputs_embeds by passing inputs_embeds directly
+            if input_ids is None:
+                # When input_ids is None during export, bypass prepare_inputs_embeds
+                # and use inputs_embeds directly (already merged at this point)
+                new_past_key_values = DynamicCache.from_legacy_cache(past_key_values)
+                # Call parent class forward, which accepts inputs_embeds
+                result = super(type(self), self).__orig_forward(
+                    input_ids=None,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    past_key_values=new_past_key_values,
+                    inputs_embeds=inputs_embeds,
+                    use_cache=use_cache,
+                )
+            else:
+                new_past_key_values = DynamicCache.from_legacy_cache(past_key_values)
+                result = self.__orig_forward(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    past_key_values=new_past_key_values,
+                    inputs_embeds=inputs_embeds,
+                    use_cache=use_cache,
+                )
+            
             if past_key_values is not None:
                 result["past_key_values"] = result["past_key_values"].to_legacy_cache()
             return result

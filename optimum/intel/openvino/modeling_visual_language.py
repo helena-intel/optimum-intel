@@ -4415,7 +4415,7 @@ class _OVLlama4ForCausalLM(OVModelForVisualCausalLM):
 
 
 class _OVDotsOCRForCausalLM(OVModelForVisualCausalLM):
-    def get_vision_embeddings(self, pixel_values, image_grid_thw, input_ids, **kwargs):
+    def get_vision_embeddings(self, pixel_values, image_grid_thw=None, input_ids=None, **kwargs):
         if input_ids is not None and input_ids.shape[1] == 1 and kwargs.get("past_key_values") is not None:
             return None
         
@@ -4426,6 +4426,25 @@ class _OVDotsOCRForCausalLM(OVModelForVisualCausalLM):
         
         # Pass grid_thw as a keyword argument
         return self.vision_embeddings(pixel_values, grid_thw=image_grid_thw).last_hidden_state
+
+    def get_multimodal_embeddings(
+        self, input_ids, pixel_values=None, attention_mask=None, position_ids=None, image_grid_thw=None, **kwargs
+    ):
+        inputs_embeds = self.get_text_embeddings(input_ids, **kwargs)
+        if pixel_values is not None:
+            vision_embeds = self.get_vision_embeddings(
+                pixel_values, image_grid_thw=image_grid_thw, input_ids=input_ids, **kwargs
+            )
+            if vision_embeds is not None:
+                inputs_embeds, attention_mask, position_ids = self.merge_vision_text_embeddings(
+                    vision_embeds,
+                    inputs_embeds,
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    **kwargs,
+                )
+        return inputs_embeds, attention_mask, position_ids
 
     def merge_vision_text_embeddings(
         self, vision_embeds, inputs_embeds, input_ids=None, attention_mask=None, position_ids=None, **kwargs
