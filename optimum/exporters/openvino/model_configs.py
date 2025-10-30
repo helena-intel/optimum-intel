@@ -13,6 +13,7 @@
 #  limitations under the License.
 
 import enum
+import logging
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
@@ -145,6 +146,9 @@ from .model_patcher import (
 
 if TYPE_CHECKING:
     from transformers.modeling_utils import PreTrainedModel  # noqa: F811
+
+
+logger = logging.getLogger(__name__)
 
 
 def init_model_configs():
@@ -3584,7 +3588,11 @@ class DotsOCROpenVINOConfig(BaseVLMOpenVINOConfig):
             behavior = DotsOCRConfigBehavior(behavior)
 
         if behavior == DotsOCRConfigBehavior.TEXT_EMBEDDINGS:
-            return get_vlm_text_embeddings_config("qwen2", self._orig_config, self.int_dtype, self.float_dtype)
+            from .model_patcher import DotsOCRTextEmbeddingsPatcher
+            export_config = get_vlm_text_embeddings_config("qwen2", self._orig_config, self.int_dtype, self.float_dtype)
+            # Override the patcher to use our custom DotsOCRTextEmbeddingsPatcher
+            export_config._MODEL_PATCHER = DotsOCRTextEmbeddingsPatcher
+            return export_config
 
         if behavior == DotsOCRConfigBehavior.LANGUAGE:
             return get_vlm_text_generation_config(
@@ -3605,6 +3613,23 @@ class DotsOCROpenVINOConfig(BaseVLMOpenVINOConfig):
                 behavior=behavior,
                 preprocessors=self._preprocessors,
             )
+
+    def get_model_for_behavior(self, model, behavior: Union[str, DotsOCRConfigBehavior]):
+        if isinstance(behavior, str) and not isinstance(behavior, DotsOCRConfigBehavior):
+            behavior = DotsOCRConfigBehavior(behavior)
+
+        if behavior == DotsOCRConfigBehavior.LANGUAGE:
+            return model  # DotsOCR itself is the language model
+
+        if behavior == DotsOCRConfigBehavior.VISION_EMBEDDINGS:
+            vision_tower = model.vision_tower
+            vision_tower.config = model.config.vision_config
+            return vision_tower
+
+        if behavior == DotsOCRConfigBehavior.TEXT_EMBEDDINGS:
+            text_embedding = model.get_input_embeddings()
+            text_embedding.config = model.config  # DotsOCR doesn't have language_model, use model.config directly
+            return text_embedding
 
     def patch_model_for_export(self, model: PreTrainedModel, model_kwargs: Optional[Dict[str, Any]] = None):
         model_kwargs = model_kwargs or {}

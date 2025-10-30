@@ -6547,7 +6547,38 @@ class DotsOCRVisionEmbeddingsPatcher(ModelPatcher):
 
     def __exit__(self, exc_type, exc_value, traceback):
         super().__exit__(exc_type, exc_value, traceback)
-        self._model.forward = self._original_forward
+        if hasattr(self, '_original_forward'):
+            self._model.forward = self._original_forward
+
+
+class DotsOCRTextEmbeddingsPatcher(ModelPatcher):
+    """
+    Custom patcher for DotsOCR text embeddings export.
+    The default InputEmbeddingPatcher doesn't work properly with torch.nn.Embedding.
+    """
+    def __init__(
+        self,
+        config: "OnnxConfig",
+        model: "PreTrainedModel",
+        model_kwargs: Dict[str, Any],
+    ):
+        # Store original forward on the model itself
+        model.__dotsocr_orig_forward = model.forward
+        
+        # Create a simple wrapper that just calls the embedding forward
+        # InputEmbedOpenvVINOConfig renames input_ids to input, so we need to accept that
+        def embedding_forward(self, input):
+            # torch.nn.Embedding.forward signature: forward(input) -> Tensor
+            return self.__dotsocr_orig_forward(input)
+        
+        model.forward = types.MethodType(embedding_forward, model)
+        super().__init__(config, model, model_kwargs)
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        super().__exit__(exc_type, exc_value, traceback)
+        if hasattr(self._model, '__dotsocr_orig_forward'):
+            self._model.forward = self._model.__dotsocr_orig_forward
+            delattr(self._model, '__dotsocr_orig_forward')
 
 
 class DotsOCRLanguageModelPatcher(OVDecoderModelPatcher):
@@ -6557,7 +6588,20 @@ class DotsOCRLanguageModelPatcher(OVDecoderModelPatcher):
         model: "PreTrainedModel",
         model_kwargs: Dict[str, Any] = None,
     ):
-        model.__orig_forward = model.forward
+        # Store the original forward before any patching
+        self._orig_forward = model.forward
+        
+        # Get the Qwen2ForCausalLM forward method
+        # We need to skip DotsOCR's forward which requires input_ids
+        # and use Qwen2's forward which properly handles inputs_embeds without input_ids
+        qwen2_forward = None
+        for base in model.__class__.__mro__[1:]:  # Skip the first class (DotsOCRForCausalLM itself)
+            if 'Qwen2ForCausalLM' in base.__name__:
+                qwen2_forward = base.forward
+                break
+        
+        if qwen2_forward is None:
+            raise ValueError(f"Could not find Qwen2ForCausalLM in model's class hierarchy. MRO: {[c.__name__ for c in model.__class__.__mro__]}")
 
         def forward_wrap(
             self,
@@ -6568,15 +6612,14 @@ class DotsOCRLanguageModelPatcher(OVDecoderModelPatcher):
             input_ids=None,
             use_cache=True,
         ):
-            # DotsOCR requires input_ids even when inputs_embeds is provided
-            # because it needs to know where image tokens are for proper merging
-            # If input_ids not provided, we skip prepare_inputs_embeds by passing inputs_embeds directly
+            # Convert to DynamicCache
+            new_past_key_values = DynamicCache.from_legacy_cache(past_key_values)
+            
+            # When input_ids is None during export (LANGUAGE behavior), 
+            # call Qwen2's forward which accepts inputs_embeds without input_ids
             if input_ids is None:
-                # When input_ids is None during export, bypass prepare_inputs_embeds
-                # and use inputs_embeds directly (already merged at this point)
-                new_past_key_values = DynamicCache.from_legacy_cache(past_key_values)
-                # Call parent class forward, which accepts inputs_embeds
-                result = super(type(self), self).__orig_forward(
+                result = qwen2_forward(
+                    self,
                     input_ids=None,
                     attention_mask=attention_mask,
                     position_ids=position_ids,
@@ -6585,8 +6628,8 @@ class DotsOCRLanguageModelPatcher(OVDecoderModelPatcher):
                     use_cache=use_cache,
                 )
             else:
-                new_past_key_values = DynamicCache.from_legacy_cache(past_key_values)
-                result = self.__orig_forward(
+                # When input_ids is provided, use the DotsOCR forward
+                result = self._patcher_orig_forward(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
                     position_ids=position_ids,
@@ -6595,13 +6638,20 @@ class DotsOCRLanguageModelPatcher(OVDecoderModelPatcher):
                     use_cache=use_cache,
                 )
             
+            # Convert back to legacy cache format
             if past_key_values is not None:
                 result["past_key_values"] = result["past_key_values"].to_legacy_cache()
             return result
 
+        model._patcher_orig_forward = self._orig_forward
+        model._qwen2_forward = qwen2_forward
         model.forward = types.MethodType(forward_wrap, model)
         super().__init__(config, model, model_kwargs)
 
     def __exit__(self, exc_type, exc_value, traceback):
         super().__exit__(exc_type, exc_value, traceback)
-        self._model.forward = self._model.__orig_forward
+        self._model.forward = self._orig_forward
+        if hasattr(self._model, '_patcher_orig_forward'):
+            delattr(self._model, '_patcher_orig_forward')
+        if hasattr(self._model, '_qwen2_forward'):
+            delattr(self._model, '_qwen2_forward')
