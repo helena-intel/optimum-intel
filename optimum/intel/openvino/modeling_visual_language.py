@@ -276,9 +276,9 @@ class OVVisionEmbedding(OVModelPart):
                 if name in kwargs:
                     inputs[name] = kwargs[name]
         
-    logger.debug(f"[DotsOCR DEBUG]   Calling request with inputs: {[(k, v.shape if hasattr(v, 'shape') else type(v)) for k, v in inputs.items()]}")
+        logger.debug(f"[DotsOCR DEBUG]   Calling request with inputs: {[(k, v.shape if hasattr(v, 'shape') else type(v)) for k, v in inputs.items()]}")
         result = self.request(inputs)
-    logger.debug(f"[DotsOCR DEBUG]   Result shape: {result[0].shape if len(result) > 0 else 'no result'}")
+        logger.debug(f"[DotsOCR DEBUG]   Result shape: {result[0].shape if len(result) > 0 else 'no result'}")
         
         last_hidden_state = result[0]
         hidden_states = None
@@ -803,13 +803,13 @@ class OVModelForVisualCausalLM(OVBaseModel, GenerationMixin):
         input_mode=None,
         **kwargs,
     ):
-    import logging
-    logger = logging.getLogger(__name__)
-    logger.debug(f"[DotsOCR DEBUG] OVModelForVisualCausalLM.forward called")
-    logger.debug(f"[DotsOCR DEBUG]   Model type: {self.config.model_type}")
-    logger.debug(f"[DotsOCR DEBUG]   input_ids shape: {input_ids.shape if input_ids is not None else None}")
-    logger.debug(f"[DotsOCR DEBUG]   pixel_values: {pixel_values.shape if pixel_values is not None else None}")
-    logger.debug(f"[DotsOCR DEBUG]   image_grid_thw: {image_grid_thw.shape if image_grid_thw is not None else None}")
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.debug(f"[DotsOCR DEBUG] OVModelForVisualCausalLM.forward called")
+        logger.debug(f"[DotsOCR DEBUG]   Model type: {self.config.model_type}")
+        logger.debug(f"[DotsOCR DEBUG]   input_ids shape: {input_ids.shape if input_ids is not None else None}")
+        logger.debug(f"[DotsOCR DEBUG]   pixel_values: {pixel_values.shape if pixel_values is not None else None}")
+        logger.debug(f"[DotsOCR DEBUG]   image_grid_thw: {image_grid_thw.shape if image_grid_thw is not None else None}")
         
         if pixel_values is None:
             pixel_values = images if images is not None else image_pixel_values
@@ -4444,11 +4444,11 @@ class _OVDotsOCRForCausalLM(OVModelForVisualCausalLM):
         import logging
         import torch
         import numpy as np
-    logger = logging.getLogger(__name__)
-    logger.debug(f"[DotsOCR DEBUG] get_vision_embeddings called")
-    logger.debug(f"[DotsOCR DEBUG]   pixel_values shape: {pixel_values.shape if pixel_values is not None else None}")
-    logger.debug(f"[DotsOCR DEBUG]   image_grid_thw: {image_grid_thw}")
-    logger.debug(f"[DotsOCR DEBUG]   input_ids shape: {input_ids.shape if input_ids is not None else None}")
+        logger = logging.getLogger(__name__)
+        logger.debug(f"[DotsOCR DEBUG] get_vision_embeddings called")
+        logger.debug(f"[DotsOCR DEBUG]   pixel_values shape: {pixel_values.shape if pixel_values is not None else None}")
+        logger.debug(f"[DotsOCR DEBUG]   image_grid_thw: {image_grid_thw}")
+        logger.debug(f"[DotsOCR DEBUG]   input_ids shape: {input_ids.shape if input_ids is not None else None}")
         
         if input_ids is not None and input_ids.shape[1] == 1 and kwargs.get("past_key_values") is not None:
             logger.debug(f"[DotsOCR DEBUG] Skipping vision embeddings (cached generation)")
@@ -4524,15 +4524,15 @@ class _OVDotsOCRForCausalLM(OVModelForVisualCausalLM):
         self, input_ids, pixel_values=None, attention_mask=None, position_ids=None, image_grid_thw=None, **kwargs
     ):
         import logging
-    logger = logging.getLogger(__name__)
-    logger.debug(f"[DotsOCR DEBUG] get_multimodal_embeddings called")
-    logger.debug(f"[DotsOCR DEBUG]   input_ids shape: {input_ids.shape}")
-    logger.debug(f"[DotsOCR DEBUG]   pixel_values: {pixel_values.shape if pixel_values is not None else None}")
-    logger.debug(f"[DotsOCR DEBUG]   image_grid_thw: {image_grid_thw}")
-    logger.debug(f"[DotsOCR DEBUG]   attention_mask: {attention_mask.shape if attention_mask is not None else None}")
+        logger = logging.getLogger(__name__)
+        logger.debug(f"[DotsOCR DEBUG] get_multimodal_embeddings called")
+        logger.debug(f"[DotsOCR DEBUG]   input_ids shape: {input_ids.shape}")
+        logger.debug(f"[DotsOCR DEBUG]   pixel_values: {pixel_values.shape if pixel_values is not None else None}")
+        logger.debug(f"[DotsOCR DEBUG]   image_grid_thw: {image_grid_thw}")
+        logger.debug(f"[DotsOCR DEBUG]   attention_mask: {attention_mask.shape if attention_mask is not None else None}")
         
-    inputs_embeds = self.get_text_embeddings(input_ids, **kwargs)
-    logger.debug(f"[DotsOCR DEBUG] Text embeddings shape: {inputs_embeds.shape}")
+        inputs_embeds = self.get_text_embeddings(input_ids, **kwargs)
+        logger.debug(f"[DotsOCR DEBUG] Text embeddings shape: {inputs_embeds.shape}")
         
         if pixel_values is not None:
             vision_embeds = self.get_vision_embeddings(
@@ -4555,25 +4555,25 @@ class _OVDotsOCRForCausalLM(OVModelForVisualCausalLM):
         self, vision_embeds, inputs_embeds, input_ids=None, attention_mask=None, position_ids=None, **kwargs
     ):
         import logging
-    logger = logging.getLogger(__name__)
-    logger.debug(f"[DotsOCR DEBUG] merge_vision_text_embeddings called")
-    logger.debug(f"[DotsOCR DEBUG]   vision_embeds shape: {vision_embeds.shape}")
-    logger.debug(f"[DotsOCR DEBUG]   inputs_embeds shape: {inputs_embeds.shape}")
-    logger.debug(f"[DotsOCR DEBUG]   input_ids shape: {input_ids.shape if input_ids is not None else None}")
-    logger.debug(f"[DotsOCR DEBUG]   image_token_id: {self.config.image_token_id}")
+        logger = logging.getLogger(__name__)
+        logger.debug(f"[DotsOCR DEBUG] merge_vision_text_embeddings called")
+        logger.debug(f"[DotsOCR DEBUG]   vision_embeds shape: {vision_embeds.shape}")
+        logger.debug(f"[DotsOCR DEBUG]   inputs_embeds shape: {inputs_embeds.shape}")
+        logger.debug(f"[DotsOCR DEBUG]   input_ids shape: {input_ids.shape if input_ids is not None else None}")
+        logger.debug(f"[DotsOCR DEBUG]   image_token_id: {self.config.image_token_id}")
         
         # Merge vision embeddings into text embeddings at image token positions
         vision_embeds = torch.from_numpy(vision_embeds) if isinstance(vision_embeds, np.ndarray) else vision_embeds
         inputs_embeds = torch.from_numpy(inputs_embeds) if isinstance(inputs_embeds, np.ndarray) else inputs_embeds
         
         # Create mask for image tokens
-    img_mask = (input_ids == self.config.image_token_id).unsqueeze(-1).expand_as(inputs_embeds)
-    logger.debug(f"[DotsOCR DEBUG]   Number of image tokens: {img_mask.sum() // inputs_embeds.shape[-1]}")
+        img_mask = (input_ids == self.config.image_token_id).unsqueeze(-1).expand_as(inputs_embeds)
+        logger.debug(f"[DotsOCR DEBUG]   Number of image tokens: {img_mask.sum() // inputs_embeds.shape[-1]}")
         
         # Verify dimensions match
-    n_image_tokens = img_mask.sum() // inputs_embeds.shape[-1]
-    n_vision_embeds = vision_embeds.shape[0]
-    logger.debug(f"[DotsOCR DEBUG]   Expected image tokens: {n_image_tokens}, Got vision embeds: {n_vision_embeds}")
+        n_image_tokens = img_mask.sum() // inputs_embeds.shape[-1]
+        n_vision_embeds = vision_embeds.shape[0]
+        logger.debug(f"[DotsOCR DEBUG]   Expected image tokens: {n_image_tokens}, Got vision embeds: {n_vision_embeds}")
         
         if n_image_tokens != n_vision_embeds:
             # Truncate if needed
