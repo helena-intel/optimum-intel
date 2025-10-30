@@ -256,13 +256,26 @@ class OVVisionEmbedding(OVModelPart):
             self._main_input = "pixel_values"
 
     def forward(self, pixel_values, **kwargs):
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(f"[DotsOCR DEBUG] OVVisionEmbedding.forward called")
+        logger.warning(f"[DotsOCR DEBUG]   pixel_values type: {type(pixel_values)}")
+        logger.warning(f"[DotsOCR DEBUG]   pixel_values shape: {pixel_values.shape if hasattr(pixel_values, 'shape') else 'no shape'}")
+        logger.warning(f"[DotsOCR DEBUG]   _main_input: {self._main_input}")
+        logger.warning(f"[DotsOCR DEBUG]   input_names: {self.input_names}")
+        logger.warning(f"[DotsOCR DEBUG]   kwargs keys: {kwargs.keys()}")
+        
         self.compile()
         inputs = {self._main_input: pixel_values}
         if len(self.input_names) > 1:
             for name in self.input_names:
                 if name in kwargs:
                     inputs[name] = kwargs[name]
+        
+        logger.warning(f"[DotsOCR DEBUG]   Calling request with inputs: {[(k, v.shape if hasattr(v, 'shape') else type(v)) for k, v in inputs.items()]}")
         result = self.request(inputs)
+        logger.warning(f"[DotsOCR DEBUG]   Result shape: {result[0].shape if len(result) > 0 else 'no result'}")
+        
         last_hidden_state = result[0]
         hidden_states = None
         pooler_out = None
@@ -786,6 +799,14 @@ class OVModelForVisualCausalLM(OVBaseModel, GenerationMixin):
         input_mode=None,
         **kwargs,
     ):
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(f"[DotsOCR DEBUG] OVModelForVisualCausalLM.forward called")
+        logger.warning(f"[DotsOCR DEBUG]   Model type: {self.config.model_type}")
+        logger.warning(f"[DotsOCR DEBUG]   input_ids shape: {input_ids.shape if input_ids is not None else None}")
+        logger.warning(f"[DotsOCR DEBUG]   pixel_values: {pixel_values.shape if pixel_values is not None else None}")
+        logger.warning(f"[DotsOCR DEBUG]   image_grid_thw: {image_grid_thw.shape if image_grid_thw is not None else None}")
+        
         if pixel_values is None:
             pixel_values = images if images is not None else image_pixel_values
         inputs_embeds, attention_mask, position_ids = self.get_multimodal_embeddings(
@@ -4416,26 +4437,96 @@ class _OVLlama4ForCausalLM(OVModelForVisualCausalLM):
 
 class _OVDotsOCRForCausalLM(OVModelForVisualCausalLM):
     def get_vision_embeddings(self, pixel_values, image_grid_thw=None, input_ids=None, **kwargs):
+        import logging
+        import torch
+        import numpy as np
+        logger = logging.getLogger(__name__)
+        logger.warning(f"[DotsOCR DEBUG] get_vision_embeddings called")
+        logger.warning(f"[DotsOCR DEBUG]   pixel_values shape: {pixel_values.shape if pixel_values is not None else None}")
+        logger.warning(f"[DotsOCR DEBUG]   image_grid_thw: {image_grid_thw}")
+        logger.warning(f"[DotsOCR DEBUG]   input_ids shape: {input_ids.shape if input_ids is not None else None}")
+        
         if input_ids is not None and input_ids.shape[1] == 1 and kwargs.get("past_key_values") is not None:
+            logger.warning(f"[DotsOCR DEBUG] Skipping vision embeddings (cached generation)")
             return None
         
         # If pixel_values is already a sequence of vision embeddings [seq_len, hidden_size],
         # bypass the vision_embeddings model and use it directly.
         if len(pixel_values.shape) == 2:
+            logger.warning(f"[DotsOCR DEBUG] Using pixel_values directly as embeddings")
             return pixel_values
         
-        # Pass grid_thw as a keyword argument
-        return self.vision_embeddings(pixel_values, grid_thw=image_grid_thw).last_hidden_state
+        # WORKAROUND: The vision model was exported with batch_size=2 due to torch.jit.trace limitations
+        # If batch_size=1, duplicate the input to batch_size=2 and then extract the first result
+        original_batch_size = pixel_values.shape[0]
+        if original_batch_size == 1:
+            logger.warning(f"[DotsOCR DEBUG] Duplicating batch_size=1 to batch_size=2 for vision model")
+            pixel_values = torch.cat([pixel_values, pixel_values], dim=0)
+            if image_grid_thw is not None:
+                if isinstance(image_grid_thw, torch.Tensor):
+                    image_grid_thw = torch.cat([image_grid_thw, image_grid_thw], dim=0)
+                elif isinstance(image_grid_thw, np.ndarray):
+                    image_grid_thw = np.concatenate([image_grid_thw, image_grid_thw], axis=0)
+        
+        # The vision model may have grid_thw as an input or it may be inlined
+        # Check if grid_thw is in the model inputs
+        if image_grid_thw is None and hasattr(self.vision_embeddings, 'input_names') and 'grid_thw' in self.vision_embeddings.input_names:
+            # Calculate grid_thw from pixel_values shape: [batch, channels, temporal, height, width]
+            batch_size = pixel_values.shape[0]
+            temporal = pixel_values.shape[2]
+            height = pixel_values.shape[3]
+            width = pixel_values.shape[4]
+            patch_size = 14  # DotsOCR uses patch_size=14
+            grid_h = height // patch_size
+            grid_w = width // patch_size
+            image_grid_thw = torch.tensor([[temporal, grid_h, grid_w]] * batch_size, dtype=torch.int64)
+            logger.warning(f"[DotsOCR DEBUG] Calculated grid_thw: {image_grid_thw}")
+        
+        # Call vision embeddings
+        if image_grid_thw is not None and hasattr(self.vision_embeddings, 'input_names') and 'grid_thw' in self.vision_embeddings.input_names:
+            # Convert to numpy if it's a torch tensor
+            if isinstance(image_grid_thw, torch.Tensor):
+                image_grid_thw_np = image_grid_thw.cpu().numpy()
+            else:
+                image_grid_thw_np = np.array(image_grid_thw, dtype=np.int64)
+            logger.warning(f"[DotsOCR DEBUG] Calling vision_embeddings model with grid_thw: {image_grid_thw_np}")
+            result = self.vision_embeddings(pixel_values, grid_thw=image_grid_thw_np).last_hidden_state
+        else:
+            logger.warning(f"[DotsOCR DEBUG] Calling vision_embeddings model without grid_thw (inlined)")
+            result = self.vision_embeddings(pixel_values).last_hidden_state
+        
+        # If we duplicated the batch, extract only the first result
+        # The vision model outputs shape (total_seq_len, hidden), need to split by batch
+        current_batch_size = pixel_values.shape[0]
+        if original_batch_size == 1 and current_batch_size == 2:
+            logger.warning(f"[DotsOCR DEBUG] Extracting first batch from duplicated result")
+            # Result is (450, 1536) for batch=2, split in half to get (225, 1536)
+            seq_len_per_batch = result.shape[0] // 2
+            result = result[:seq_len_per_batch]
+        
+        logger.warning(f"[DotsOCR DEBUG] Vision embeddings output shape: {result.shape}")
+        return result
 
     def get_multimodal_embeddings(
         self, input_ids, pixel_values=None, attention_mask=None, position_ids=None, image_grid_thw=None, **kwargs
     ):
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(f"[DotsOCR DEBUG] get_multimodal_embeddings called")
+        logger.warning(f"[DotsOCR DEBUG]   input_ids shape: {input_ids.shape}")
+        logger.warning(f"[DotsOCR DEBUG]   pixel_values: {pixel_values.shape if pixel_values is not None else None}")
+        logger.warning(f"[DotsOCR DEBUG]   image_grid_thw: {image_grid_thw}")
+        logger.warning(f"[DotsOCR DEBUG]   attention_mask: {attention_mask.shape if attention_mask is not None else None}")
+        
         inputs_embeds = self.get_text_embeddings(input_ids, **kwargs)
+        logger.warning(f"[DotsOCR DEBUG] Text embeddings shape: {inputs_embeds.shape}")
+        
         if pixel_values is not None:
             vision_embeds = self.get_vision_embeddings(
                 pixel_values, image_grid_thw=image_grid_thw, input_ids=input_ids, **kwargs
             )
             if vision_embeds is not None:
+                logger.warning(f"[DotsOCR DEBUG] Merging vision and text embeddings")
                 inputs_embeds, attention_mask, position_ids = self.merge_vision_text_embeddings(
                     vision_embeds,
                     inputs_embeds,
@@ -4444,21 +4535,32 @@ class _OVDotsOCRForCausalLM(OVModelForVisualCausalLM):
                     position_ids=position_ids,
                     **kwargs,
                 )
+                logger.warning(f"[DotsOCR DEBUG] After merge - inputs_embeds shape: {inputs_embeds.shape}")
         return inputs_embeds, attention_mask, position_ids
 
     def merge_vision_text_embeddings(
         self, vision_embeds, inputs_embeds, input_ids=None, attention_mask=None, position_ids=None, **kwargs
     ):
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(f"[DotsOCR DEBUG] merge_vision_text_embeddings called")
+        logger.warning(f"[DotsOCR DEBUG]   vision_embeds shape: {vision_embeds.shape}")
+        logger.warning(f"[DotsOCR DEBUG]   inputs_embeds shape: {inputs_embeds.shape}")
+        logger.warning(f"[DotsOCR DEBUG]   input_ids shape: {input_ids.shape if input_ids is not None else None}")
+        logger.warning(f"[DotsOCR DEBUG]   image_token_id: {self.config.image_token_id}")
+        
         # Merge vision embeddings into text embeddings at image token positions
         vision_embeds = torch.from_numpy(vision_embeds) if isinstance(vision_embeds, np.ndarray) else vision_embeds
         inputs_embeds = torch.from_numpy(inputs_embeds) if isinstance(inputs_embeds, np.ndarray) else inputs_embeds
         
         # Create mask for image tokens
         img_mask = (input_ids == self.config.image_token_id).unsqueeze(-1).expand_as(inputs_embeds)
+        logger.warning(f"[DotsOCR DEBUG]   Number of image tokens: {img_mask.sum() // inputs_embeds.shape[-1]}")
         
         # Verify dimensions match
         n_image_tokens = img_mask.sum() // inputs_embeds.shape[-1]
         n_vision_embeds = vision_embeds.shape[0]
+        logger.warning(f"[DotsOCR DEBUG]   Expected image tokens: {n_image_tokens}, Got vision embeds: {n_vision_embeds}")
         
         if n_image_tokens != n_vision_embeds:
             # Truncate if needed
@@ -4470,12 +4572,15 @@ class _OVDotsOCRForCausalLM(OVModelForVisualCausalLM):
                 new_flat_mask = torch.zeros_like(flat_mask)
                 new_flat_mask[true_indices] = True
                 img_mask = new_flat_mask.view_as(img_mask)
+                logger.warning(f"[DotsOCR DEBUG]   Truncated mask to match vision embeds")
         
         # Scatter vision embeddings into text embeddings
+        logger.warning(f"[DotsOCR DEBUG] Scattering vision embeddings into text embeddings")
         inputs_embeds = inputs_embeds.masked_scatter(
             img_mask.to(inputs_embeds.device),
             vision_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
         )
+        logger.warning(f"[DotsOCR DEBUG] Merge complete, output shape: {inputs_embeds.shape}")
         
         return inputs_embeds, attention_mask, position_ids
 

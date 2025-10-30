@@ -6531,13 +6531,39 @@ class DotsOCRVisionEmbeddingsPatcher(ModelPatcher):
         model_kwargs: Optional[Dict[str, Any]] = None,
     ):
         super().__init__(config, model, model_kwargs)
+        # Store the fixed grid_thw values from config
+        # The vision model will be exported for a fixed image size (420x420)
+        self.temporal_patch_size = config._normalized_config.config.temporal_patch_size  # 1
+        self.patch_size = config._normalized_config.config.patch_size  # 14
+        # For 420x420 images: 420 / 14 = 30 patches in each dimension
+        self.fixed_grid_h = 420 // self.patch_size  # 30
+        self.fixed_grid_w = 420 // self.patch_size  # 30
 
     def __enter__(self):
         super().__enter__()
-        # Patch the vision tower forward method to rename parameters and set bf16=False
+        # Patch the vision tower forward method to use a FIXED grid_thw
+        # This makes the vision model specific to 420x420 images but allows proper tracing
         original_forward = self._model.forward
+        import torch
         
-        def patched_forward(pixel_values, grid_thw):
+        # Store as an attribute of the model itself so it's truly constant during tracing
+        self._model._fixed_grid_thw_for_export = torch.tensor(
+            [[self.temporal_patch_size, self.fixed_grid_h, self.fixed_grid_w]], 
+            dtype=torch.int64
+        )
+        
+        # Capture model reference for use in closure
+        model = self._model
+        
+        def patched_forward(pixel_values):
+            batch_size = pixel_values.shape[0]
+            # Use the fixed grid_thw stored as a model attribute
+            # For batch > 1, repeat it
+            if batch_size == 1:
+                grid_thw = model._fixed_grid_thw_for_export
+            else:
+                grid_thw = model._fixed_grid_thw_for_export.repeat(batch_size, 1)
+            
             # Rename pixel_values to hidden_states and call with bf16=False
             return original_forward(hidden_states=pixel_values, grid_thw=grid_thw, bf16=False)
         
@@ -6549,6 +6575,9 @@ class DotsOCRVisionEmbeddingsPatcher(ModelPatcher):
         super().__exit__(exc_type, exc_value, traceback)
         if hasattr(self, '_original_forward'):
             self._model.forward = self._original_forward
+        # Clean up the temporary attribute
+        if hasattr(self._model, '_fixed_grid_thw_for_export'):
+            delattr(self._model, '_fixed_grid_thw_for_export')
 
 
 class DotsOCRTextEmbeddingsPatcher(ModelPatcher):

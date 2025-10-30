@@ -3513,9 +3513,11 @@ class DummyDotsOCRVisionInputGenerator(DummyVisionInputGenerator):
             grid_h = self.height // self.patch_size
             grid_w = self.width // self.patch_size
             grid_t = self.temporal_patch_size
-            # Return shape [batch_size, 3] with [t, h, w] for each image
-            import torch
-            return torch.tensor([[grid_t, grid_h, grid_w]] * self.batch_size, dtype=torch.int64)
+            # Return as a tuple instead of tensor to allow proper loop unrolling during tracing
+            # The vision model has: for t, h, w in grid_thw:
+            # If grid_thw is a tensor, it creates problematic Split operations
+            # If it's a tuple/list, the loop gets unrolled at trace time
+            return [(grid_t, grid_h, grid_w) for _ in range(self.batch_size)]
 
 
 class DotsOCRConfigBehavior(str, enum.Enum):
@@ -3640,9 +3642,10 @@ class DotsOCROpenVINOConfig(BaseVLMOpenVINOConfig):
     @property
     def inputs(self) -> Dict[str, Dict[int, str]]:
         if self._behavior == DotsOCRConfigBehavior.VISION_EMBEDDINGS:
+            # Only pixel_values is a model input; grid_thw is provided as a tuple during tracing
+            # and gets inlined into the model (the loop is unrolled)
             return {
                 "pixel_values": {0: "batch_size", 2: "temporal_patch_size", 3: "height", 4: "width"},
-                "grid_thw": {0: "batch_size"},
             }
         return {}
 
