@@ -5735,11 +5735,6 @@ class Phi4MMLanguageModelPatcher(OVDecoderModelPatcher):
                     if hasattr(first_layer.self_attn, 'rotary_emb'):
                         rotary_emb_type = type(first_layer.self_attn.rotary_emb).__name__
                         print(f"[DEBUG] Found rotary_emb in layer.self_attn! Type: {rotary_emb_type}")
-                        
-                        # Check if it's already a LongRoPE implementation
-                        if 'LongRoPE' in rotary_emb_type or 'SuScaled' in rotary_emb_type:
-                            print(f"[DEBUG] Phi4MM already has native LongRoPE implementation - preserving it")
-                            should_apply_longrope = True  # Mark as detected but don't patch
         
         if hasattr(self._model.model, "rotary_emb"):
             rope_type = getattr(self._model.model.rotary_emb, "rope_type", "default")
@@ -5770,36 +5765,24 @@ class Phi4MMLanguageModelPatcher(OVDecoderModelPatcher):
         print(f"  - should_apply_longrope: {should_apply_longrope}")
 
         if should_apply_longrope:
-            print(f"[DEBUG] Checking LongRope application for Phi4MM...")
+            print(f"[DEBUG] Applying Phi3-style LongRope to Phi4MM (overriding native implementation)...")
             
-            # Check if Phi4MM already has native LongRoPE implementation
-            has_native_longrope = False
-            if hasattr(self._model.model, 'layers') and len(self._model.model.layers) > 0:
-                first_layer = self._model.model.layers[0]
-                if hasattr(first_layer, 'self_attn') and hasattr(first_layer.self_attn, 'rotary_emb'):
-                    rotary_emb_type = type(first_layer.self_attn.rotary_emb).__name__
-                    if 'LongRoPE' in rotary_emb_type or 'SuScaled' in rotary_emb_type:
-                        has_native_longrope = True
-                        print(f"[DEBUG] Phi4MM has native {rotary_emb_type} - NOT patching to preserve functionality")
-            
-            if not has_native_longrope:
-                print(f"[DEBUG] No native LongRoPE found, applying Phi3-style patch...")
-                # Check if rotary_emb is at model level or layer level
-                if hasattr(self._model.model, "rotary_emb"):
-                    print(f"[DEBUG] Found rotary_emb at model level, applying there...")
-                    self._apply_longrope_to_rotary_emb(self._model.model.rotary_emb)
-                else:
-                    print(f"[DEBUG] No rotary_emb at model level, checking layer level...")
-                    # Apply LongRope to each layer's rotary_emb
-                    longrope_applied = False
-                    for i, layer in enumerate(self._model.model.layers):
-                        if hasattr(layer, 'self_attn') and hasattr(layer.self_attn, 'rotary_emb'):
-                            print(f"[DEBUG] Found rotary_emb in layer {i} self_attn, applying LongRope...")
-                            self._apply_longrope_to_rotary_emb(layer.self_attn.rotary_emb)
-                            longrope_applied = True
-                    
-                    if not longrope_applied:
-                        print(f"[DEBUG] ERROR: No rotary_emb found in any layer!")
+            # Check if rotary_emb is at model level or layer level
+            if hasattr(self._model.model, "rotary_emb"):
+                print(f"[DEBUG] Found rotary_emb at model level, applying there...")
+                self._apply_longrope_to_rotary_emb(self._model.model.rotary_emb)
+            else:
+                print(f"[DEBUG] No rotary_emb at model level, checking layer level...")
+                # Apply LongRope to each layer's rotary_emb
+                longrope_applied = False
+                for i, layer in enumerate(self._model.model.layers):
+                    if hasattr(layer, 'self_attn') and hasattr(layer.self_attn, 'rotary_emb'):
+                        print(f"[DEBUG] Found rotary_emb in layer {i} self_attn, applying LongRope...")
+                        self._apply_longrope_to_rotary_emb(layer.self_attn.rotary_emb)
+                        longrope_applied = True
+                
+                if not longrope_applied:
+                    print(f"[DEBUG] ERROR: No rotary_emb found in any layer!")
         elif self._model.config.max_position_embeddings != getattr(
             self._model.config, "original_max_position_embeddings", self._model.config.max_position_embeddings
         ):
