@@ -4288,28 +4288,14 @@ class _OVPhi4MMForCausalLM(OVModelForVisualCausalLM):
             past_key_values=kwargs.get("past_key_values"),
         )
         
-        # Recalculate position_ids based on actual sequence length for LongRope compatibility
-        if position_ids is None and attention_mask is not None:
-            # For LongRope, we need position_ids that reflect the actual sequence length
-            # after vision/audio embeddings have been added
-            batch_size, seq_len = inputs_embeds.shape[:2]
-            if attention_mask.shape[1] != seq_len:
-                # Extend attention_mask to match the actual sequence length
-                if attention_mask.shape[1] < seq_len:
-                    # Pad with ones for the additional vision/audio tokens
-                    padding = torch.ones(
-                        (attention_mask.shape[0], seq_len - attention_mask.shape[1]), 
-                        dtype=attention_mask.dtype, 
-                        device=attention_mask.device
-                    )
-                    attention_mask = torch.cat([attention_mask, padding], dim=1)
-                else:
-                    # Truncate if somehow longer
-                    attention_mask = attention_mask[:, :seq_len]
-            
-            # Recalculate position_ids based on the updated attention_mask
-            position_ids = attention_mask.long().cumsum(-1) - 1
-            position_ids.masked_fill_(attention_mask == 0, 1)
+        # Debug position IDs for LongRope
+        if position_ids is not None:
+            print(f"[DEBUG] Phi4MM position_ids shape: {position_ids.shape}")
+            print(f"[DEBUG] Phi4MM position_ids min/max: {position_ids.min().item()}/{position_ids.max().item()}")
+            print(f"[DEBUG] Phi4MM inputs_embeds shape: {inputs_embeds.shape}")
+            if attention_mask is not None:
+                print(f"[DEBUG] Phi4MM attention_mask shape: {attention_mask.shape}")
+                print(f"[DEBUG] Phi4MM attention_mask sum: {attention_mask.sum().item()}")
         
         return inputs_embeds, attention_mask, position_ids
 

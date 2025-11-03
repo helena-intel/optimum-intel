@@ -1500,7 +1500,10 @@ def select_ext_factor(
 
 
 def long_rope(self, x, position_ids, seq_len=None):
+    print(f"[DEBUG] long_rope called with position_ids shape: {position_ids.shape}")
+    print(f"[DEBUG] long_rope position_ids min/max: {position_ids.min().item()}/{position_ids.max().item()}")
     seq_len = torch.max(position_ids) + 1
+    print(f"[DEBUG] long_rope calculated seq_len: {seq_len}")
     original_max_position_embeddings = (
         self.original_max_position_embeddings
         if hasattr(self, "original_max_position_embeddings")  # Fixed typo: was "original_max_positional_embeddings"
@@ -1511,9 +1514,12 @@ def long_rope(self, x, position_ids, seq_len=None):
         if hasattr(self, "max_position_embeddings")
         else self.config.max_position_embeddings
     )
+    print(f"[DEBUG] long_rope original_max_position_embeddings: {original_max_position_embeddings}")
+    print(f"[DEBUG] long_rope max_position_embeddings: {max_position_embeddings}")
     # Convert to tensor for proper tracing
     original_max_position_embeddings = torch.tensor(original_max_position_embeddings, device=seq_len.device, dtype=seq_len.dtype)
     inv_freq = select_ext_factor(seq_len, original_max_position_embeddings, self.inv_freq, self.long_inv_freq)
+    print(f"[DEBUG] long_rope using {'long' if seq_len > original_max_position_embeddings.item() else 'short'} inv_freq")
 
     inv_freq_expanded = inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
     position_ids_expanded = position_ids[:, None, :].float()
