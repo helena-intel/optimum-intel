@@ -4287,6 +4287,30 @@ class _OVPhi4MMForCausalLM(OVModelForVisualCausalLM):
             audio_projection_mode=audio_projection_mode,
             past_key_values=kwargs.get("past_key_values"),
         )
+        
+        # Recalculate position_ids based on actual sequence length for LongRope compatibility
+        if position_ids is None and attention_mask is not None:
+            # For LongRope, we need position_ids that reflect the actual sequence length
+            # after vision/audio embeddings have been added
+            batch_size, seq_len = inputs_embeds.shape[:2]
+            if attention_mask.shape[1] != seq_len:
+                # Extend attention_mask to match the actual sequence length
+                if attention_mask.shape[1] < seq_len:
+                    # Pad with ones for the additional vision/audio tokens
+                    padding = torch.ones(
+                        (attention_mask.shape[0], seq_len - attention_mask.shape[1]), 
+                        dtype=attention_mask.dtype, 
+                        device=attention_mask.device
+                    )
+                    attention_mask = torch.cat([attention_mask, padding], dim=1)
+                else:
+                    # Truncate if somehow longer
+                    attention_mask = attention_mask[:, :seq_len]
+            
+            # Recalculate position_ids based on the updated attention_mask
+            position_ids = attention_mask.long().cumsum(-1) - 1
+            position_ids.masked_fill_(attention_mask == 0, 1)
+        
         return inputs_embeds, attention_mask, position_ids
 
     def prepare_inputs_for_generation(self, *args, **kwargs):
