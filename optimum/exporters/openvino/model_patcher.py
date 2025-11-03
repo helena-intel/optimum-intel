@@ -5715,6 +5715,26 @@ class Phi4MMLanguageModelPatcher(OVDecoderModelPatcher):
         print(f"[DEBUG] Phi4MM LongRope detection:")
         print(f"  - Has rotary_emb: {hasattr(self._model.model, 'rotary_emb')}")
         
+        # Explore model structure to find rotary_emb
+        if not hasattr(self._model.model, 'rotary_emb'):
+            print(f"[DEBUG] Exploring model structure to find rotary_emb...")
+            if hasattr(self._model.model, 'layers') and len(self._model.model.layers) > 0:
+                first_layer = self._model.model.layers[0]
+                print(f"[DEBUG] First layer type: {type(first_layer)}")
+                print(f"[DEBUG] First layer attributes: {[attr for attr in dir(first_layer) if 'rotary' in attr.lower()]}")
+                
+                if hasattr(first_layer, 'self_attn'):
+                    self_attn_attrs = [attr for attr in dir(first_layer.self_attn) if 'rotary' in attr.lower()]
+                    print(f"[DEBUG] self_attn rotary attributes: {self_attn_attrs}")
+                    if hasattr(first_layer.self_attn, 'rotary_emb'):
+                        rotary_emb_type = type(first_layer.self_attn.rotary_emb).__name__
+                        print(f"[DEBUG] Found rotary_emb in layer.self_attn! Type: {rotary_emb_type}")
+                        
+                        # Check if it's already a LongRoPE implementation
+                        if 'LongRoPE' in rotary_emb_type or 'SuScaled' in rotary_emb_type:
+                            print(f"[DEBUG] Phi4MM already has native LongRoPE implementation - preserving it")
+                            should_apply_longrope = True  # Mark as detected but don't patch
+        
         if hasattr(self._model.model, "rotary_emb"):
             rope_type = getattr(self._model.model.rotary_emb, "rope_type", "default")
             print(f"  - rope_type: {rope_type}")
@@ -5743,48 +5763,80 @@ class Phi4MMLanguageModelPatcher(OVDecoderModelPatcher):
         
         print(f"  - should_apply_longrope: {should_apply_longrope}")
 
-        if should_apply_longrope and hasattr(self._model.model, "rotary_emb"):
-            print(f"[DEBUG] Applying LongRope to Phi4MM...")
-            # Check if rope_init_fn exists, if not try to initialize LongRope manually
-            if hasattr(self._model.model.rotary_emb, "rope_init_fn"):
-                print(f"[DEBUG] Using rope_init_fn...")
-                long_inv_freq, short_inv_freq = self._model.model.rotary_emb.rope_init_fn(
-                    self._model.config,
-                    torch.device("cpu"),
-                    seq_len=self._model.config.original_max_position_embeddings + 1,
-                )
-                self._model.model.rotary_emb.inv_freq = short_inv_freq
-                self._model.model.rotary_emb.long_inv_freq = long_inv_freq
-                self._model.model.rotary_emb._orig_forward = self._model.model.rotary_emb.forward
-                self._model.model.rotary_emb.forward = types.MethodType(long_rope, self._model.model.rotary_emb)
-                print(f"[DEBUG] LongRope applied successfully via rope_init_fn")
-            else:
-                print(f"[DEBUG] rope_init_fn not found, using manual initialization...")
-                # Manual LongRope initialization fallback
-                if hasattr(self._model.model.rotary_emb, "inv_freq"):
-                    # Store original inv_freq as short_inv_freq
-                    self._model.model.rotary_emb.short_inv_freq = self._model.model.rotary_emb.inv_freq.clone()
-                    # Calculate long_inv_freq using scaling factors from config if available
-                    if hasattr(self._model.config, "rope_scaling") and "short_factor" in self._model.config.rope_scaling:
-                        short_factor = torch.tensor(self._model.config.rope_scaling["short_factor"])
-                        long_factor = torch.tensor(self._model.config.rope_scaling["long_factor"])
-                        base_inv_freq = self._model.model.rotary_emb.inv_freq
-                        self._model.model.rotary_emb.long_inv_freq = base_inv_freq * (long_factor / short_factor)
-                        print(f"[DEBUG] LongRope applied with scaling factors")
-                    else:
-                        # Fallback: use the same inv_freq for both short and long
-                        self._model.model.rotary_emb.long_inv_freq = self._model.model.rotary_emb.inv_freq.clone()
-                        print(f"[DEBUG] LongRope applied with fallback (no scaling factors)")
-                    
-                    self._model.model.rotary_emb._orig_forward = self._model.model.rotary_emb.forward
-                    self._model.model.rotary_emb.forward = types.MethodType(long_rope, self._model.model.rotary_emb)
-                    print(f"[DEBUG] LongRope applied successfully via manual initialization")
+        if should_apply_longrope:
+            print(f"[DEBUG] Checking LongRope application for Phi4MM...")
+            
+            # Check if Phi4MM already has native LongRoPE implementation
+            has_native_longrope = False
+            if hasattr(self._model.model, 'layers') and len(self._model.model.layers) > 0:
+                first_layer = self._model.model.layers[0]
+                if hasattr(first_layer, 'self_attn') and hasattr(first_layer.self_attn, 'rotary_emb'):
+                    rotary_emb_type = type(first_layer.self_attn.rotary_emb).__name__
+                    if 'LongRoPE' in rotary_emb_type or 'SuScaled' in rotary_emb_type:
+                        has_native_longrope = True
+                        print(f"[DEBUG] Phi4MM has native {rotary_emb_type} - NOT patching to preserve functionality")
+            
+            if not has_native_longrope:
+                print(f"[DEBUG] No native LongRoPE found, applying Phi3-style patch...")
+                # Check if rotary_emb is at model level or layer level
+                if hasattr(self._model.model, "rotary_emb"):
+                    print(f"[DEBUG] Found rotary_emb at model level, applying there...")
+                    self._apply_longrope_to_rotary_emb(self._model.model.rotary_emb)
                 else:
-                    print(f"[DEBUG] ERROR: No inv_freq found in rotary_emb!")
+                    print(f"[DEBUG] No rotary_emb at model level, checking layer level...")
+                    # Apply LongRope to each layer's rotary_emb
+                    longrope_applied = False
+                    for i, layer in enumerate(self._model.model.layers):
+                        if hasattr(layer, 'self_attn') and hasattr(layer.self_attn, 'rotary_emb'):
+                            print(f"[DEBUG] Found rotary_emb in layer {i} self_attn, applying LongRope...")
+                            self._apply_longrope_to_rotary_emb(layer.self_attn.rotary_emb)
+                            longrope_applied = True
+                    
+                    if not longrope_applied:
+                        print(f"[DEBUG] ERROR: No rotary_emb found in any layer!")
         elif self._model.config.max_position_embeddings != getattr(
             self._model.config, "original_max_position_embeddings", self._model.config.max_position_embeddings
         ):
             self._model.config.max_position_embeddings = self._model.config.original_max_position_embeddings
+
+    def _apply_longrope_to_rotary_emb(self, rotary_emb):
+        """Apply LongRope to a specific rotary_emb instance"""
+        # Check if rope_init_fn exists, if not try to initialize LongRope manually
+        if hasattr(rotary_emb, "rope_init_fn"):
+            print(f"[DEBUG] Using rope_init_fn...")
+            long_inv_freq, short_inv_freq = rotary_emb.rope_init_fn(
+                self._model.config,
+                torch.device("cpu"),
+                seq_len=self._model.config.original_max_position_embeddings + 1,
+            )
+            rotary_emb.inv_freq = short_inv_freq
+            rotary_emb.long_inv_freq = long_inv_freq
+            rotary_emb._orig_forward = rotary_emb.forward
+            rotary_emb.forward = types.MethodType(long_rope, rotary_emb)
+            print(f"[DEBUG] LongRope applied successfully via rope_init_fn")
+        else:
+            print(f"[DEBUG] rope_init_fn not found, using manual initialization...")
+            # Manual LongRope initialization fallback
+            if hasattr(rotary_emb, "inv_freq"):
+                # Store original inv_freq as short_inv_freq
+                rotary_emb.short_inv_freq = rotary_emb.inv_freq.clone()
+                # Calculate long_inv_freq using scaling factors from config if available
+                if hasattr(self._model.config, "rope_scaling") and "short_factor" in self._model.config.rope_scaling:
+                    short_factor = torch.tensor(self._model.config.rope_scaling["short_factor"])
+                    long_factor = torch.tensor(self._model.config.rope_scaling["long_factor"])
+                    base_inv_freq = rotary_emb.inv_freq
+                    rotary_emb.long_inv_freq = base_inv_freq * (long_factor / short_factor)
+                    print(f"[DEBUG] LongRope applied with scaling factors")
+                else:
+                    # Fallback: use the same inv_freq for both short and long
+                    rotary_emb.long_inv_freq = rotary_emb.inv_freq.clone()
+                    print(f"[DEBUG] LongRope applied with fallback (no scaling factors)")
+                
+                rotary_emb._orig_forward = rotary_emb.forward
+                rotary_emb.forward = types.MethodType(long_rope, rotary_emb)
+                print(f"[DEBUG] LongRope applied successfully via manual initialization")
+            else:
+                print(f"[DEBUG] ERROR: No inv_freq found in rotary_emb!")
 
     def __exit__(self, exc_type, exc_value, traceback):
         super().__exit__(exc_type, exc_value, traceback)
@@ -5796,6 +5848,10 @@ class Phi4MMLanguageModelPatcher(OVDecoderModelPatcher):
         for layer in self._model.model.layers:
             if hasattr(layer.self_attn, "_orig_forward"):
                 layer.self_attn.forward = layer.self_attn._orig_forward
+            # Also restore layer-level rotary_emb patches
+            if hasattr(layer.self_attn, "rotary_emb") and hasattr(layer.self_attn.rotary_emb, "_orig_forward"):
+                layer.self_attn.rotary_emb.forward = layer.self_attn.rotary_emb._orig_forward
+        # Restore model-level rotary_emb patches if they exist
         if hasattr(self._model.model, "rotary_emb") and hasattr(self._model.model.rotary_emb, "_orig_forward"):
             self._model.model.rotary_emb.forward = self._model.model.rotary_emb._orig_forward
 
