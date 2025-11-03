@@ -1503,7 +1503,7 @@ def long_rope(self, x, position_ids, seq_len=None):
     seq_len = torch.max(position_ids) + 1
     original_max_position_embeddings = (
         self.original_max_position_embeddings
-        if hasattr(self, "original_max_positional_embeddings")
+        if hasattr(self, "original_max_position_embeddings")  # Fixed typo: was "original_max_positional_embeddings"
         else self.config.original_max_position_embeddings
     )
     max_position_embeddings = (
@@ -5710,19 +5710,77 @@ class Phi4MMLanguageModelPatcher(OVDecoderModelPatcher):
                     rotary_emb.base ** (torch.arange(0, rotary_emb.dim, 2, dtype=torch.int64).float() / rotary_emb.dim)
                 )
 
+        # Check for LongRope configuration through multiple methods
+        should_apply_longrope = False
+        print(f"[DEBUG] Phi4MM LongRope detection:")
+        print(f"  - Has rotary_emb: {hasattr(self._model.model, 'rotary_emb')}")
+        
+        if hasattr(self._model.model, "rotary_emb"):
+            rope_type = getattr(self._model.model.rotary_emb, "rope_type", "default")
+            print(f"  - rope_type: {rope_type}")
+            if rope_type == "longrope":
+                should_apply_longrope = True
+                print(f"  - LongRope detected via rope_type")
+        
+        if hasattr(self._model.config, "rope_scaling"):
+            print(f"  - Has rope_scaling: {self._model.config.rope_scaling}")
+            if (
+                self._model.config.rope_scaling is not None
+                and self._model.config.rope_scaling.get("type") == "longrope"
+            ):
+                should_apply_longrope = True
+                print(f"  - LongRope detected via rope_scaling")
+        
         if (
-            hasattr(self._model.model, "rotary_emb")
-            and getattr(self._model.model.rotary_emb, "rope_type", "default") == "longrope"
+            hasattr(self._model.config, "original_max_position_embeddings") 
+            and hasattr(self._model.config, "max_position_embeddings")
         ):
-            long_inv_freq, short_inv_freq = self._model.model.rotary_emb.rope_init_fn(
-                self._model.config,
-                torch.device("cpu"),
-                seq_len=self._model.config.original_max_position_embeddings + 1,
-            )
-            self._model.model.rotary_emb.inv_freq = short_inv_freq
-            self._model.model.rotary_emb.long_inv_freq = long_inv_freq
-            self._model.model.rotary_emb._orig_forward = self._model.model.rotary_emb.forward
-            self._model.model.rotary_emb.forward = types.MethodType(long_rope, self._model.model.rotary_emb)
+            print(f"  - original_max_position_embeddings: {self._model.config.original_max_position_embeddings}")
+            print(f"  - max_position_embeddings: {self._model.config.max_position_embeddings}")
+            if self._model.config.max_position_embeddings > self._model.config.original_max_position_embeddings:
+                should_apply_longrope = True
+                print(f"  - LongRope detected via max_position_embeddings > original_max_position_embeddings")
+        
+        print(f"  - should_apply_longrope: {should_apply_longrope}")
+
+        if should_apply_longrope and hasattr(self._model.model, "rotary_emb"):
+            print(f"[DEBUG] Applying LongRope to Phi4MM...")
+            # Check if rope_init_fn exists, if not try to initialize LongRope manually
+            if hasattr(self._model.model.rotary_emb, "rope_init_fn"):
+                print(f"[DEBUG] Using rope_init_fn...")
+                long_inv_freq, short_inv_freq = self._model.model.rotary_emb.rope_init_fn(
+                    self._model.config,
+                    torch.device("cpu"),
+                    seq_len=self._model.config.original_max_position_embeddings + 1,
+                )
+                self._model.model.rotary_emb.inv_freq = short_inv_freq
+                self._model.model.rotary_emb.long_inv_freq = long_inv_freq
+                self._model.model.rotary_emb._orig_forward = self._model.model.rotary_emb.forward
+                self._model.model.rotary_emb.forward = types.MethodType(long_rope, self._model.model.rotary_emb)
+                print(f"[DEBUG] LongRope applied successfully via rope_init_fn")
+            else:
+                print(f"[DEBUG] rope_init_fn not found, using manual initialization...")
+                # Manual LongRope initialization fallback
+                if hasattr(self._model.model.rotary_emb, "inv_freq"):
+                    # Store original inv_freq as short_inv_freq
+                    self._model.model.rotary_emb.short_inv_freq = self._model.model.rotary_emb.inv_freq.clone()
+                    # Calculate long_inv_freq using scaling factors from config if available
+                    if hasattr(self._model.config, "rope_scaling") and "short_factor" in self._model.config.rope_scaling:
+                        short_factor = torch.tensor(self._model.config.rope_scaling["short_factor"])
+                        long_factor = torch.tensor(self._model.config.rope_scaling["long_factor"])
+                        base_inv_freq = self._model.model.rotary_emb.inv_freq
+                        self._model.model.rotary_emb.long_inv_freq = base_inv_freq * (long_factor / short_factor)
+                        print(f"[DEBUG] LongRope applied with scaling factors")
+                    else:
+                        # Fallback: use the same inv_freq for both short and long
+                        self._model.model.rotary_emb.long_inv_freq = self._model.model.rotary_emb.inv_freq.clone()
+                        print(f"[DEBUG] LongRope applied with fallback (no scaling factors)")
+                    
+                    self._model.model.rotary_emb._orig_forward = self._model.model.rotary_emb.forward
+                    self._model.model.rotary_emb.forward = types.MethodType(long_rope, self._model.model.rotary_emb)
+                    print(f"[DEBUG] LongRope applied successfully via manual initialization")
+                else:
+                    print(f"[DEBUG] ERROR: No inv_freq found in rotary_emb!")
         elif self._model.config.max_position_embeddings != getattr(
             self._model.config, "original_max_position_embeddings", self._model.config.max_position_embeddings
         ):
