@@ -4288,15 +4288,6 @@ class _OVPhi4MMForCausalLM(OVModelForVisualCausalLM):
             past_key_values=kwargs.get("past_key_values"),
         )
         
-        # Debug position IDs for LongRope
-        if position_ids is not None:
-            print(f"[DEBUG] Phi4MM position_ids shape: {position_ids.shape}")
-            print(f"[DEBUG] Phi4MM position_ids min/max: {position_ids.min().item()}/{position_ids.max().item()}")
-            print(f"[DEBUG] Phi4MM inputs_embeds shape: {inputs_embeds.shape}")
-            if attention_mask is not None:
-                print(f"[DEBUG] Phi4MM attention_mask shape: {attention_mask.shape}")
-                print(f"[DEBUG] Phi4MM attention_mask sum: {attention_mask.sum().item()}")
-        
         return inputs_embeds, attention_mask, position_ids
 
     def prepare_inputs_for_generation(self, *args, **kwargs):

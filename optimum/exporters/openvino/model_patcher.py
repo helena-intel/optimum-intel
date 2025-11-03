@@ -5821,9 +5821,14 @@ class Phi4MMLanguageModelPatcher(OVDecoderModelPatcher):
                     rotary_emb.long_inv_freq = rotary_emb.inv_freq.clone()
                     print(f"[DEBUG] LongRope applied with fallback (no scaling factors)")
                 
+                # CRITICAL: For OpenVINO export, force the use of long inv_freq immediately
+                # since the model will be traced with this state
+                print(f"[DEBUG] FORCING long inv_freq for OpenVINO export compatibility")
+                rotary_emb.inv_freq = rotary_emb.long_inv_freq.clone()
+                
                 rotary_emb._orig_forward = rotary_emb.forward
                 rotary_emb.forward = types.MethodType(long_rope, rotary_emb)
-                print(f"[DEBUG] LongRope applied successfully via manual initialization")
+                print(f"[DEBUG] LongRope applied successfully via manual initialization (forced long mode)")
             else:
                 print(f"[DEBUG] ERROR: No inv_freq found in rotary_emb!")
 
