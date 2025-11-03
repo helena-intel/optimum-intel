@@ -4289,6 +4289,26 @@ class _OVPhi4MMForCausalLM(OVModelForVisualCausalLM):
         )
         return inputs_embeds, attention_mask, position_ids
 
+    def prepare_inputs_for_generation(self, *args, **kwargs):
+        # Overwritten -- this model may need to switch between short and long rope, invalidating the
+        # cache in the process
+        model_inputs = super().prepare_inputs_for_generation(*args, **kwargs)
+
+        # When the first time input length reached long and short factor switching point, enforce re-compute cache
+        # It will cause downside of slower at this single token position, however, better than current failure.
+        if (
+            model_inputs.get("past_key_values")
+            and self.config.rope_scaling
+            and model_inputs["input_ids"].shape[1] >= self.config.original_max_position_embeddings + 1
+        ):
+            cache_position = model_inputs.get("cache_position")
+            if cache_position is not None:
+                past_length = cache_position[0]
+                if past_length <= self.config.original_max_position_embeddings:
+                    model_inputs["past_key_values"] = None
+
+        return model_inputs
+
     @staticmethod
     def preprocess_inputs(
         text: str,

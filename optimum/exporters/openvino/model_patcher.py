@@ -1568,11 +1568,12 @@ class Phi3ModelPatcher(OVDecoderModelPatcher):
             hasattr(self._model.model, "rotary_emb")
             and getattr(self._model.model.rotary_emb, "rope_type", "default") == "longrope"
         ):
-            long_inv_freq, _ = self._model.model.rotary_emb.rope_init_fn(
+            long_inv_freq, short_inv_freq = self._model.model.rotary_emb.rope_init_fn(
                 self._model.config,
                 torch.device("cpu"),
                 seq_len=self._model.config.original_max_position_embeddings + 1,
             )
+            self._model.model.rotary_emb.inv_freq = short_inv_freq
             self._model.model.rotary_emb.long_inv_freq = long_inv_freq
             self._model.model.rotary_emb._orig_forward = self._model.model.rotary_emb.forward
             self._model.model.rotary_emb.forward = types.MethodType(long_rope, self._model.model.rotary_emb)
@@ -5677,9 +5678,32 @@ class Phi4MMLanguageModelPatcher(OVDecoderModelPatcher):
         model.forward = types.MethodType(lm_forward, model)
         super().__init__(config, model, model_kwargs)
 
+    def __enter__(self):
+        super().__enter__()
+
+        if (
+            hasattr(self._model.model, "rotary_emb")
+            and getattr(self._model.model.rotary_emb, "rope_type", "default") == "longrope"
+        ):
+            long_inv_freq, short_inv_freq = self._model.model.rotary_emb.rope_init_fn(
+                self._model.config,
+                torch.device("cpu"),
+                seq_len=self._model.config.original_max_position_embeddings + 1,
+            )
+            self._model.model.rotary_emb.inv_freq = short_inv_freq
+            self._model.model.rotary_emb.long_inv_freq = long_inv_freq
+            self._model.model.rotary_emb._orig_forward = self._model.model.rotary_emb.forward
+            self._model.model.rotary_emb.forward = types.MethodType(long_rope, self._model.model.rotary_emb)
+        elif self._model.config.max_position_embeddings != getattr(
+            self._model.config, "original_max_position_embeddings", self._model.config.max_position_embeddings
+        ):
+            self._model.config.max_position_embeddings = self._model.config.original_max_position_embeddings
+
     def __exit__(self, exc_type, exc_value, traceback):
         super().__exit__(exc_type, exc_value, traceback)
         self._model.forward = self._model.__orig_forward
+        if hasattr(self._model.model, "rotary_emb") and hasattr(self._model.model.rotary_emb, "_orig_forward"):
+            self._model.model.rotary_emb.forward = self._model.model.rotary_emb._orig_forward
 
 
 class Phi4MMAudioForwardEmbeddingsPatcher(ModelPatcher):
