@@ -1511,6 +1511,8 @@ def long_rope(self, x, position_ids, seq_len=None):
         if hasattr(self, "max_position_embeddings")
         else self.config.max_position_embeddings
     )
+    # Convert to tensor for proper tracing
+    original_max_position_embeddings = torch.tensor(original_max_position_embeddings, device=seq_len.device, dtype=seq_len.dtype)
     inv_freq = select_ext_factor(seq_len, original_max_position_embeddings, self.inv_freq, self.long_inv_freq)
 
     inv_freq_expanded = inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
@@ -5681,6 +5683,33 @@ class Phi4MMLanguageModelPatcher(OVDecoderModelPatcher):
     def __enter__(self):
         super().__enter__()
 
+        # currently, long RoPE can not be traced for long context support, disable it to avoid potential accuracy issues
+        if is_transformers_version("<", "4.48.0"):
+            self._model.model._orig_forward = self._model.model.forward
+            self._model.model.forward = types.MethodType(phi3_442_forward, self._model.model)
+
+        # https://github.com/huggingface/transformers/blob/30ee508c6c92a1c0aa0281d193c7c0fb815b8d2f/src/transformers/models/phi3/modeling_phi3.py#L113
+        # init inv_freq for torchscript tracing
+        # 4.48 transformers version phi3 fixed, but issue still visible with trust_remote_true=True (trust_remote_code has _support_sdpa = False)
+        for layer in self._model.model.layers:
+            if (
+                is_torch_version(">=", "2.1.0")
+                and is_transformers_version("<", "4.48.0")
+                or not getattr(self._model, "_supports_sdpa", False)
+            ):
+                orig_self_attn_fwd = layer.self_attn.forward
+                layer.self_attn.forward = types.MethodType(_phi3_self_attn_sdpa_forward, layer.self_attn)
+                layer.self_attn._orig_forward = orig_self_attn_fwd
+
+            if (
+                hasattr(layer.self_attn, "rotary_emb")
+                and getattr(layer.self_attn.rotary_emb, "inv_freq", None) is None
+            ):
+                rotary_emb = layer.self_attn.rotary_emb
+                layer.self_attn.rotary_emb.inv_freq = 1.0 / (
+                    rotary_emb.base ** (torch.arange(0, rotary_emb.dim, 2, dtype=torch.int64).float() / rotary_emb.dim)
+                )
+
         if (
             hasattr(self._model.model, "rotary_emb")
             and getattr(self._model.model.rotary_emb, "rope_type", "default") == "longrope"
@@ -5702,6 +5731,13 @@ class Phi4MMLanguageModelPatcher(OVDecoderModelPatcher):
     def __exit__(self, exc_type, exc_value, traceback):
         super().__exit__(exc_type, exc_value, traceback)
         self._model.forward = self._model.__orig_forward
+        if hasattr(self._model.model, "_orig_forward"):
+            self._model.model.forward = self._model.model._orig_forward
+        if hasattr(self._model.model, "_orig_update_causal_mask"):
+            self._model.model._update_causal_mask = self._model.model._orig_update_causal_mask
+        for layer in self._model.model.layers:
+            if hasattr(layer.self_attn, "_orig_forward"):
+                layer.self_attn.forward = layer.self_attn._orig_forward
         if hasattr(self._model.model, "rotary_emb") and hasattr(self._model.model.rotary_emb, "_orig_forward"):
             self._model.model.rotary_emb.forward = self._model.model.rotary_emb._orig_forward
 
