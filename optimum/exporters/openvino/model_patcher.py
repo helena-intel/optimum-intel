@@ -1500,34 +1500,53 @@ def select_ext_factor(
 
 
 def long_rope(self, x, position_ids, seq_len=None):
-    seq_len = torch.max(position_ids) + 1
-    original_max_position_embeddings = (
-        self.original_max_position_embeddings
-        if hasattr(self, "original_max_positional_embeddings")
-        else self.config.original_max_position_embeddings
+    if position_ids is not None:
+        seq_len = torch.max(position_ids) + 1
+    elif seq_len is not None:
+        seq_len = torch.as_tensor(seq_len, device=x.device, dtype=torch.long)
+    else:
+        seq_len = torch.tensor(x.shape[-2], device=x.device, dtype=torch.long)
+
+    if hasattr(self, "original_max_position_embeddings"):
+        original_max_position_embeddings = self.original_max_position_embeddings
+    elif hasattr(self, "original_max_positional_embeddings"):
+        original_max_position_embeddings = self.original_max_positional_embeddings
+    elif hasattr(self, "config") and hasattr(self.config, "original_max_position_embeddings"):
+        original_max_position_embeddings = self.config.original_max_position_embeddings
+    else:
+        original_max_position_embeddings = getattr(self, "max_position_embeddings", seq_len.item())
+
+    max_position_embeddings = getattr(self, "max_position_embeddings", None)
+    if max_position_embeddings is None and hasattr(self, "config") and hasattr(self.config, "max_position_embeddings"):
+        max_position_embeddings = self.config.max_position_embeddings
+
+    seq_len = seq_len.to(x.device)
+    original_max_position_embeddings = torch.as_tensor(
+        original_max_position_embeddings, device=seq_len.device, dtype=seq_len.dtype
     )
-    max_position_embeddings = (
-        self.max_position_embeddings
-        if hasattr(self, "max_position_embeddings")
-        else self.config.max_position_embeddings
-    )
+    max_position_embeddings = torch.as_tensor(max_position_embeddings, device=seq_len.device, dtype=seq_len.dtype)
+
     inv_freq = select_ext_factor(seq_len, original_max_position_embeddings, self.inv_freq, self.long_inv_freq)
+
+    if position_ids is None:
+        batch = x.shape[0]
+        position_ids = torch.arange(seq_len.item(), device=x.device, dtype=torch.long).unsqueeze(0).expand(batch, -1)
 
     inv_freq_expanded = inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
     position_ids_expanded = position_ids[:, None, :].float()
 
-    # Force float32 since bfloat16 loses precision on long contexts
-    # See https://github.com/huggingface/transformers/pull/29285
-    device_type = x.device.type
-    device_type = device_type if isinstance(device_type, str) and device_type != "mps" else "cpu"
     freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
     emb = torch.cat((freqs, freqs), dim=-1)
 
-    scale = max_position_embeddings / original_max_position_embeddings
-    if scale <= 1.0:
+    scale_value = (
+        max_position_embeddings.to(torch.float32) / original_max_position_embeddings.to(torch.float32)
+    ).item()
+    if scale_value <= 1.0:
         scaling_factor = 1.0
     else:
-        scaling_factor = math.sqrt(1 + math.log(scale) / math.log(original_max_position_embeddings))
+        scaling_factor = math.sqrt(
+            1 + math.log(scale_value) / math.log(float(original_max_position_embeddings.item()))
+        )
     cos = emb.cos() * scaling_factor
     sin = emb.sin() * scaling_factor
     return cos, sin
@@ -5675,9 +5694,80 @@ class Phi4MMLanguageModelPatcher(OVDecoderModelPatcher):
 
         model.__orig_forward = model.forward
         model.forward = types.MethodType(lm_forward, model)
+        self._phi4mm_rotaries: List[Any] = []
         super().__init__(config, model, model_kwargs)
 
+    def __enter__(self):
+        super().__enter__()
+
+        self._phi4mm_rotaries = []
+        config = getattr(self._model, "config", None)
+        rope_scaling = getattr(config, "rope_scaling", None)
+        language_model = getattr(self._model, "model", None)
+
+        if (
+            rope_scaling
+            and isinstance(rope_scaling, dict)
+            and rope_scaling.get("type") == "longrope"
+            and hasattr(language_model, "layers")
+        ):
+            for layer in language_model.layers:
+                rotary = getattr(getattr(layer, "self_attn", None), "rotary_emb", None)
+                if rotary is None or getattr(rotary, "_ov_longrope_patched", False) or not hasattr(rotary, "inv_freq"):
+                    continue
+
+                orig_inv_freq = rotary.inv_freq.detach().clone()
+                device = orig_inv_freq.device
+                dtype = orig_inv_freq.dtype
+                dim = getattr(rotary, "dim", orig_inv_freq.shape[0] * 2)
+
+                exponent = torch.arange(0, dim, 2, dtype=torch.float32, device=device)
+                base_value = torch.tensor(getattr(rotary, "base", 10000.0), dtype=torch.float32, device=device)
+                denom = torch.pow(base_value, exponent / dim)
+
+                short_factor_value = getattr(rotary, "short_factor", 1.0)
+                long_factor_value = getattr(rotary, "long_factor", short_factor_value)
+                short_factor = torch.tensor(short_factor_value, dtype=torch.float32, device=device)
+                long_factor = torch.tensor(long_factor_value, dtype=torch.float32, device=device)
+
+                short_inv_freq = (1.0 / (short_factor * denom)).to(dtype).to(device)
+                long_inv_freq = (1.0 / (long_factor * denom)).to(dtype).to(device)
+
+                rotary._orig_forward = rotary.forward
+                rotary._orig_inv_freq = orig_inv_freq
+                rotary.register_buffer("inv_freq", short_inv_freq, persistent=False)
+                rotary.long_inv_freq = long_inv_freq
+                if not hasattr(rotary, "config") and config is not None:
+                    rotary.config = config
+                    rotary._ov_added_config = True
+                rotary.forward = types.MethodType(long_rope, rotary)
+                rotary._ov_longrope_patched = True
+                self._phi4mm_rotaries.append(rotary)
+        else:
+            if (
+                config is not None
+                and hasattr(config, "original_max_position_embeddings")
+                and getattr(config, "max_position_embeddings", None) != config.original_max_position_embeddings
+            ):
+                config.max_position_embeddings = config.original_max_position_embeddings
+
     def __exit__(self, exc_type, exc_value, traceback):
+        for rotary in getattr(self, "_phi4mm_rotaries", []):
+            if hasattr(rotary, "_orig_forward"):
+                rotary.forward = rotary._orig_forward
+                del rotary._orig_forward
+            if hasattr(rotary, "_orig_inv_freq"):
+                rotary.register_buffer("inv_freq", rotary._orig_inv_freq, persistent=False)
+                del rotary._orig_inv_freq
+            if hasattr(rotary, "long_inv_freq"):
+                del rotary.long_inv_freq
+            if hasattr(rotary, "_ov_added_config"):
+                del rotary.config
+                del rotary._ov_added_config
+            if hasattr(rotary, "_ov_longrope_patched"):
+                del rotary._ov_longrope_patched
+        self._phi4mm_rotaries = []
+
         super().__exit__(exc_type, exc_value, traceback)
         self._model.forward = self._model.__orig_forward
 
