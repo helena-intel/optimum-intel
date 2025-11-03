@@ -5800,9 +5800,14 @@ class Phi4MMLanguageModelPatcher(OVDecoderModelPatcher):
             )
             rotary_emb.inv_freq = short_inv_freq
             rotary_emb.long_inv_freq = long_inv_freq
+            
+            # CRITICAL: For OpenVINO export, force the use of long inv_freq immediately
+            print(f"[DEBUG] FORCING long inv_freq for OpenVINO export compatibility (rope_init_fn path)")
+            rotary_emb.inv_freq = long_inv_freq.clone()
+            
             rotary_emb._orig_forward = rotary_emb.forward
             rotary_emb.forward = types.MethodType(long_rope, rotary_emb)
-            print(f"[DEBUG] LongRope applied successfully via rope_init_fn")
+            print(f"[DEBUG] LongRope applied successfully via rope_init_fn (forced long mode)")
         else:
             print(f"[DEBUG] rope_init_fn not found, using manual initialization...")
             # Manual LongRope initialization fallback
@@ -5823,8 +5828,10 @@ class Phi4MMLanguageModelPatcher(OVDecoderModelPatcher):
                 
                 # CRITICAL: For OpenVINO export, force the use of long inv_freq immediately
                 # since the model will be traced with this state
-                print(f"[DEBUG] FORCING long inv_freq for OpenVINO export compatibility")
+                print(f"[DEBUG] FORCING long inv_freq for OpenVINO export compatibility (manual path)")
+                print(f"[DEBUG] Before forcing - inv_freq shape: {rotary_emb.inv_freq.shape}, long_inv_freq shape: {rotary_emb.long_inv_freq.shape}")
                 rotary_emb.inv_freq = rotary_emb.long_inv_freq.clone()
+                print(f"[DEBUG] After forcing - inv_freq is now long_inv_freq")
                 
                 rotary_emb._orig_forward = rotary_emb.forward
                 rotary_emb.forward = types.MethodType(long_rope, rotary_emb)
