@@ -303,6 +303,57 @@ class OVModelIntegrationTest(unittest.TestCase):
             del model
             gc.collect()
 
+    @unittest.skipUnless(
+        os.environ.get("OV_DOTS_OCR_MODEL") is not None,
+        "DotsOCR OpenVINO model not provided. Set OV_DOTS_OCR_MODEL env var to test.",
+    )
+    def test_dots_ocr_model_mapping_and_inference(self):
+        """
+        Test that DotsOCR model loads correctly and is mapped to the right runtime class.
+        This test requires setting OV_DOTS_OCR_MODEL environment variable to a local path
+        or Hub ID of an exported DotsOCR OpenVINO model.
+        """
+        model_path = os.environ.get("OV_DOTS_OCR_MODEL")
+        
+        # Load model with trust_remote_code since DotsOCR uses custom code
+        loaded_model = OVModelForVisualCausalLM.from_pretrained(
+            model_path, 
+            trust_remote_code=True,
+            device=OPENVINO_DEVICE
+        )
+        
+        # Verify model type and class mapping
+        self.assertEqual(loaded_model.config.model_type, "dots_ocr")
+        self.assertIsInstance(loaded_model, MODEL_TYPE_TO_CLS_MAPPING["dots_ocr"])
+        
+        # Test save and reload
+        with TemporaryDirectory() as tmpdirname:
+            loaded_model.save_pretrained(tmpdirname)
+            folder_contents = os.listdir(tmpdirname)
+            
+            # Check all required model files are saved
+            model_files = [
+                OV_LANGUAGE_MODEL_NAME,
+                OV_TEXT_EMBEDDINGS_MODEL_NAME,
+                OV_VISION_EMBEDDINGS_MODEL_NAME,
+            ]
+            for xml_file_name in model_files:
+                self.assertIn(xml_file_name, folder_contents)
+                self.assertIn(xml_file_name.replace(".xml", ".bin"), folder_contents)
+            
+            # Reload and verify it works
+            reloaded_model = OVModelForVisualCausalLM.from_pretrained(
+                tmpdirname,
+                trust_remote_code=True,
+                device=OPENVINO_DEVICE
+            )
+            self.assertEqual(reloaded_model.config.model_type, "dots_ocr")
+            
+            del reloaded_model
+        
+        del loaded_model
+        gc.collect()
+
     def test_load_from_hub_and_save_seq2seq_model(self):
         tokenizer = AutoTokenizer.from_pretrained(self.OV_SEQ2SEQ_MODEL_ID)
         tokens = tokenizer("This is a sample input", return_tensors="pt")

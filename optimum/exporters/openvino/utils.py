@@ -227,6 +227,7 @@ MULTI_MODAL_TEXT_GENERATION_MODELS = [
     "phi3_v",
     "qwen2_vl",
     "qwen2_5_vl",
+    "dots_ocr",
     "got_ocr2",
     "gemma3",
     "idefics3",

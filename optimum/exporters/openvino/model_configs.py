@@ -168,6 +168,10 @@ def init_model_configs():
         "transformers",
         "AutoModelForImageTextToText",
     )
+    TasksManager._CUSTOM_CLASSES[("pt", "dots_ocr", "image-text-to-text")] = (
+        "transformers",
+        "AutoModelForCausalLM",
+    )
     TasksManager._CUSTOM_CLASSES[("pt", "llava_next_video", "image-text-to-text")] = (
         "transformers",
         "AutoModelForVision2Seq",
@@ -3461,6 +3465,186 @@ class Qwen2_5_VLOpenVINOConfig(Qwen2VLOpenVINOConfig):
         if self._behavior == Qwen2VLConfigBehavior.VISION_EMBEDDINGS_MERGER:
             return Qwen2_5_VLVisionEmbMergerPatcher(self, model, model_kwargs)
         return super().patch_model_for_export(model, model_kwargs)
+
+
+# DotsOCR Configuration
+class DotsOCRConfigBehavior(str, enum.Enum):
+    LANGUAGE = "language"
+    VISION_EMBEDDINGS = "vision_embeddings"
+    TEXT_EMBEDDINGS = "text_embeddings"
+
+
+class DummyDotsOCRVisionInputGenerator(DummyInputGenerator):
+    SUPPORTED_INPUT_NAMES = {"pixel_values", "grid_thw"}
+
+    def __init__(
+        self,
+        task: str,
+        normalized_config: NormalizedConfig,
+        batch_size: int = DEFAULT_DUMMY_SHAPES["batch_size"],
+        **kwargs,
+    ):
+        self.task = task
+        # For vision embeddings, pixel_values contains ALL patches across the batch (flattened)
+        # So grid_thw must describe a single batch to match the number of patches
+        self.batch_size = 1
+        self.normalized_config = normalized_config
+
+    def generate(self, input_name: str, framework: str = "pt", int_dtype: str = "int64", float_dtype: str = "fp32"):
+        # DotsVisionTransformer expects:
+        # - pixel_values: [num_patches, channels*temporal_patch_size*patch_size*patch_size]
+        #   The processor outputs this flattened 2D format, and the model internally 
+        #   reshapes it in DotsPatchEmbed.forward()
+        # - grid_thw: [batch, 3] containing [t, h, w] grid dimensions
+        
+        if input_name == "pixel_values":
+            #  For a 224x224 image with patch_size=14:
+            # num_patches = t * (height/patch_size) * (width/patch_size) = 1 * 16 * 16 = 256
+            # features_per_patch = channels * temporal_patch_size * patch_size * patch_size = 3 * 1 * 14 * 14 = 588
+            patch_size = 14
+            temporal_patch_size = 1
+            channels = 3
+            image_height = 224
+            image_width = 224
+            
+            t = 1
+            h_grid = image_height // patch_size  # 16
+            w_grid = image_width // patch_size   # 16
+            num_patches = t * h_grid * w_grid  # 256
+            features_per_patch = channels * temporal_patch_size * patch_size * patch_size  # 588
+            
+            shape = (num_patches, features_per_patch)
+            return self.random_float_tensor(shape, framework=framework, dtype=float_dtype)
+        
+        elif input_name == "grid_thw":
+            batch_size = self.batch_size
+            # grid_thw contains [t, h, w] for each image in the batch
+            # t=1 (single frame)
+            # For 224x224 image with patch_size=14:
+            # h_grid = w_grid = 224/14 = 16
+            # So grid dimensions are [temporal, grid_h, grid_w] = [1, 16, 16]
+            shape = (batch_size, 3)
+            if framework == "pt":
+                import torch
+                return torch.tensor([[1, 16, 16]] * batch_size, dtype=torch.int64)
+            else:
+                import numpy as np
+                return np.array([[1, 16, 16]] * batch_size, dtype=np.int64)
+
+
+@register_in_tasks_manager("dots_ocr", *["image-text-to-text"], library_name="transformers")
+class DotsOCROpenVINOConfig(BaseVLMOpenVINOConfig):
+    SUPPORTED_BEHAVIORS = [model_type.value for model_type in DotsOCRConfigBehavior]
+    NORMALIZED_CONFIG_CLASS = NormalizedVisionConfig
+    DUMMY_INPUT_GENERATOR_CLASSES = (DummyDotsOCRVisionInputGenerator,)
+    MIN_TRANSFORMERS_VERSION = "4.40.0"
+
+    def __init__(
+        self,
+        config: "PretrainedConfig",
+        task: str = "feature-extraction",
+        int_dtype: str = "int64",
+        float_dtype: str = "fp32",
+        behavior: DotsOCRConfigBehavior = DotsOCRConfigBehavior.VISION_EMBEDDINGS,
+        preprocessors: Optional[List[Any]] = None,
+    ):
+        super().__init__(
+            config=config,
+            task=task,
+            int_dtype=int_dtype,
+            float_dtype=float_dtype,
+            preprocessors=preprocessors,
+        )
+        self._behavior = behavior
+        self._orig_config = config
+        if self._behavior == DotsOCRConfigBehavior.VISION_EMBEDDINGS and hasattr(config, "vision_config"):
+            self._config = config.vision_config
+            self._normalized_config = self.NORMALIZED_CONFIG_CLASS(self._config)
+
+    @staticmethod
+    def get_model_for_behavior(model, behavior: Union[str, DotsOCRConfigBehavior]):
+        if isinstance(behavior, str) and not isinstance(behavior, DotsOCRConfigBehavior):
+            behavior = DotsOCRConfigBehavior(behavior)
+
+        if behavior == DotsOCRConfigBehavior.LANGUAGE:
+            return model
+
+        if behavior == DotsOCRConfigBehavior.VISION_EMBEDDINGS:
+            # Extract the vision tower (DotsVisionTransformer)
+            vision_embeddings = model.vision_tower
+            vision_embeddings.config = model.config.vision_config
+            return vision_embeddings
+
+        if behavior == DotsOCRConfigBehavior.TEXT_EMBEDDINGS:
+            # Extract text embedding layer
+            text_embedding = model.model.embed_tokens if hasattr(model, "model") else model.embed_tokens
+            text_embedding.config = model.config
+            return text_embedding
+
+    def with_behavior(
+        self,
+        behavior: Union[str, DotsOCRConfigBehavior],
+    ):
+        """
+        Creates a config for different behaviour.
+        Args:
+            behavior ([`ConfigBehavior`]):
+                The behavior to use for the new instance.
+        """
+        if isinstance(behavior, str) and not isinstance(behavior, DotsOCRConfigBehavior):
+            behavior = DotsOCRConfigBehavior(behavior)
+
+        if behavior == DotsOCRConfigBehavior.TEXT_EMBEDDINGS:
+            # DotsOCR is based on Qwen2, so use qwen2 text embeddings config
+            return get_vlm_text_embeddings_config("qwen2", self._orig_config, self.int_dtype, self.float_dtype)
+
+        if behavior == DotsOCRConfigBehavior.LANGUAGE:
+            # DotsOCR is based on Qwen2, use qwen2 language model config with proper KV cache handling
+            return get_vlm_text_generation_config(
+                "qwen2",
+                self._orig_config,
+                self.int_dtype,
+                self.float_dtype,
+                # No special patcher needed since DotsOCR's language model is standard Qwen2
+                # KV cache is handled by the base Qwen2 implementation
+            )
+
+        if behavior == DotsOCRConfigBehavior.VISION_EMBEDDINGS:
+            return self.__class__(
+                self._orig_config,
+                task=self.task,
+                int_dtype=self.int_dtype,
+                float_dtype=self.float_dtype,
+                behavior=behavior,
+                preprocessors=self._preprocessors,
+            )
+
+    def patch_model_for_export(self, model: PreTrainedModel, model_kwargs: Optional[Dict[str, Any]] = None):
+        model_kwargs = model_kwargs or {}
+        if self._behavior == DotsOCRConfigBehavior.VISION_EMBEDDINGS:
+            # Use custom patcher to handle input renaming and bf16 parameter
+            # The model passed here is already the extracted vision_tower from get_model_for_behavior
+            from .model_patcher import DotsOCRVisionEmbeddingsPatcher
+            return DotsOCRVisionEmbeddingsPatcher(self, model, model_kwargs)
+        return super().patch_model_for_export(model, model_kwargs)
+
+    @property
+    def inputs(self) -> Dict[str, Dict[int, str]]:
+        if self._behavior == DotsOCRConfigBehavior.VISION_EMBEDDINGS:
+            # Vision embeddings take pixel_values and grid_thw
+            # pixel_values are 2D: [num_patches, features_per_patch]
+            return {
+                "pixel_values": {0: "num_patches"},
+                "grid_thw": {0: "batch_size"}
+            }
+        return {}
+
+    @property
+    def outputs(self) -> Dict[str, Dict[int, str]]:
+        if self._behavior == DotsOCRConfigBehavior.VISION_EMBEDDINGS:
+            # Vision embeddings output has dynamic sequence length (num_patches after merging)
+            return {"last_hidden_state": {0: "seq_len"}}
+        return {}
 
 
 @register_in_tasks_manager(

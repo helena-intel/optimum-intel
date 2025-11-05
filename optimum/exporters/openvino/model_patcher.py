@@ -6954,3 +6954,121 @@ class Zamba2ModelPatcher(ModelPatcher):
             else:
                 continue
             mamba_layer.forward = mamba_layer._orig_forward
+
+
+class DotsOCRVisionEmbeddingsPatcher(ModelPatcher):
+    """
+    Patcher for DotsOCR vision tower to handle input naming and bf16 parameter.
+    
+    The DotsVisionTransformer.forward expects (hidden_states, grid_thw, bf16=True),
+    but for export we want (pixel_values, grid_thw) to match the standard VLM pattern.
+    
+    Additionally, the vision tower has Python loops over grid_thw that don't trace well,
+    so we provide a simplified forward that works for batch_size=1 or fixed grids.
+    """
+    def __init__(
+        self,
+        config: "OnnxConfig",
+        model: "PreTrainedModel",
+        model_kwargs: Optional[Dict[str, Any]] = None,
+    ):
+        import types
+        import torch
+        import torch.nn.functional as F
+        
+        # Store original forward method and helper methods
+        original_forward = model.forward
+        original_get_pos_ids = model.get_pos_ids_by_grid
+        original_rot_pos_emb = model.rot_pos_emb
+        
+        def traceable_get_pos_ids_by_grid(self, grid_thw):
+            """Traceable version that handles batch processing without Python loops"""
+            # For tracing, we assume grid_thw has shape [batch, 3] with values [t, h, w]
+            # We'll process each item in the batch using vectorized operations
+            batch_size = grid_thw.shape[0]
+            
+            # For simplicity during export, assume all images have the same grid dimensions
+            # Take the first grid dimensions
+            t, h, w = grid_thw[0, 0], grid_thw[0, 1], grid_thw[0, 2]
+            
+            # Convert to int for indexing (during tracing these become constants)
+            h_int = int(h.item()) if hasattr(h, 'item') else int(h)
+            w_int = int(w.item()) if hasattr(w, 'item') else int(w)
+            t_int = int(t.item()) if hasattr(t, 'item') else int(t)
+            
+            # Generate position IDs for a single grid
+            hpos_ids = torch.arange(h_int, device=grid_thw.device).unsqueeze(1).expand(-1, w_int)
+            hpos_ids = hpos_ids.reshape(
+                h_int // self.spatial_merge_size,
+                self.spatial_merge_size,
+                w_int // self.spatial_merge_size,
+                self.spatial_merge_size,
+            )
+            hpos_ids = hpos_ids.permute(0, 2, 1, 3).flatten()
+
+            wpos_ids = torch.arange(w_int, device=grid_thw.device).unsqueeze(0).expand(h_int, -1)
+            wpos_ids = wpos_ids.reshape(
+                h_int // self.spatial_merge_size,
+                self.spatial_merge_size,
+                w_int // self.spatial_merge_size,
+                self.spatial_merge_size,
+            )
+            wpos_ids = wpos_ids.permute(0, 2, 1, 3).flatten()
+            
+            single_pos_ids = torch.stack([hpos_ids, wpos_ids], dim=-1).repeat(t_int, 1)
+            
+            # Replicate for batch
+            pos_ids = [single_pos_ids for _ in range(batch_size)]
+            return pos_ids
+        
+        def traceable_rot_pos_emb(self, grid_thw):
+            """Traceable version of rotary position embedding computation"""
+            pos_ids = traceable_get_pos_ids_by_grid(self, grid_thw)
+            pos_ids = torch.cat(pos_ids, dim=0)  # [num_patches, 2]
+            max_grid_size = grid_thw[:, 1:].max()
+            rotary_pos_emb_full = self.rotary_pos_emb(max_grid_size)  # [max_grid_size, head_dim//4]
+            
+            # Index with 2D pos_ids: [num_patches, 2] -> [num_patches, 2, head_dim//4]
+            # The VisionRotaryEmbedding uses step=2 in arange, so it produces head_dim//4 frequencies
+            # Original model does flatten(1) which gives [num_patches, head_dim//2]
+            # But we need to match this behavior for the patcher
+            indexed = rotary_pos_emb_full[pos_ids]  # [num_patches, 2, head_dim//4]
+            rotary_pos_emb = indexed.flatten(1)  # [num_patches, head_dim//2]
+            return rotary_pos_emb
+        
+        def patched_forward(self, pixel_values, grid_thw, **kwargs):
+            """
+            Traceable forward pass for DotsVisionTransformer
+            Args:
+                pixel_values: [num_patches, channels*temporal_patch_size*patch_size*patch_size]
+                    Flattened patches as output by the DotsOCR processor
+                grid_thw: [batch, 3] containing [t, h, w] grid dimensions
+            """
+            # Don't use bf16 during export - causes tracing issues
+            hidden_states = pixel_values
+            # patch_embed expects the 2D flattened format and does the reshaping internally
+            hidden_states = self.patch_embed(hidden_states, grid_thw)
+
+            # Use traceable version of position embeddings
+            rotary_pos_emb = traceable_rot_pos_emb(self, grid_thw)
+
+            cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
+                dim=0, dtype=torch.int32
+            )
+            cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
+
+            for blk in self.blocks:
+                hidden_states = blk(hidden_states, cu_seqlens=cu_seqlens, rotary_pos_emb=rotary_pos_emb)
+
+            if self.config.post_norm:
+                hidden_states = self.post_trunk_norm(hidden_states)
+
+            hidden_states = self.merger(hidden_states)
+            return hidden_states
+        
+        # Replace model's forward method BEFORE calling super().__init__()
+        model.__orig_forward = original_forward
+        model.forward = types.MethodType(patched_forward, model)
+        
+        # Now initialize the base class with the modified model
+        super().__init__(config, model, model_kwargs)

@@ -4423,6 +4423,122 @@ class _OVLlama4ForCausalLM(OVModelForVisualCausalLM):
         return inputs
 
 
+class _OVDotsOCRForCausalLM(OVModelForVisualCausalLM):
+    """OpenVINO inference class for DotsOCR vision-language model."""
+
+    def get_vision_embeddings(self, pixel_values, input_ids=None, **kwargs):
+        """
+        Get vision embeddings from the vision tower.
+        
+        DotsOCR uses a vision tower (DotsVisionTransformer) that processes images
+        and returns embeddings to be inserted into the text stream.
+        
+        The DotsOCR processor outputs pixel_values as a flattened 2D tensor
+        [num_patches, channels*temporal_patch_size*patch_size*patch_size] which
+        matches the expected input format for the exported vision model.
+        """
+        # Skip vision processing for cached generations (past_key_values present and input_ids length == 1)
+        if input_ids is not None and input_ids.shape[1] == 1 and kwargs.get("past_key_values") is not None:
+            return None
+            
+        # Get grid_thw from kwargs - this specifies the grid dimensions [t, h, w] for each image
+        image_grid_thw = kwargs.get("image_grid_thw")
+        
+        if image_grid_thw is None:
+            raise ValueError("image_grid_thw is required for DotsOCR vision embeddings")
+        
+        # DotsOCR processor outputs pixel_values in the correct 2D format [num_patches, features_per_patch]
+        # Pass directly to the vision model
+        vision_output = self.vision_embeddings(pixel_values, grid_thw=image_grid_thw)
+        return vision_output.last_hidden_state
+
+    def merge_vision_text_embeddings(
+        self, vision_embeds, inputs_embeds, input_ids=None, attention_mask=None, position_ids=None, **kwargs
+    ):
+        """
+        Merge vision embeddings into text embeddings at image token positions.
+        
+        DotsOCR uses image tokens (config.image_token_id) as placeholders in the input_ids.
+        Vision embeddings are inserted at these positions using masked_scatter.
+        """
+        # Convert to torch tensors if needed
+        vision_embeds = torch.from_numpy(vision_embeds) if isinstance(vision_embeds, np.ndarray) else vision_embeds
+        inputs_embeds = torch.from_numpy(inputs_embeds) if isinstance(inputs_embeds, np.ndarray) else inputs_embeds
+        
+        # Create mask for image token positions
+        img_mask = input_ids == self.config.image_token_id
+        
+        # Count image tokens and vision features
+        n_image_tokens = img_mask.sum()
+        n_vision_features = vision_embeds.shape[0]
+        
+        # Handle dimension mismatch by truncating if needed
+        if n_image_tokens > n_vision_features:
+            logger.warning(
+                f"Number of image tokens ({n_image_tokens}) exceeds vision features ({n_vision_features}). "
+                f"Truncating mask to match vision embeddings."
+            )
+            # Find the indices and truncate
+            true_indices = torch.nonzero(img_mask)
+            if len(true_indices) > vision_embeds.shape[0]:
+                true_indices = true_indices[:vision_embeds.shape[0]]
+                new_img_mask = torch.zeros_like(img_mask, device=img_mask.device)
+                new_img_mask[true_indices[:, 0], true_indices[:, 1]] = True
+                img_mask = new_img_mask
+        
+        # Expand mask to match embedding dimensions and scatter vision embeddings
+        img_mask_expanded = img_mask.unsqueeze(-1).expand_as(inputs_embeds).to(inputs_embeds.device)
+        vision_embeds = vision_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
+        inputs_embeds = inputs_embeds.masked_scatter(img_mask_expanded, vision_embeds)
+        
+        return inputs_embeds, attention_mask, position_ids
+
+    @staticmethod
+    def preprocess_inputs(
+        text: Optional[str] = None,
+        image: Optional["Image"] = None,
+        processor: Optional[AutoImageProcessor] = None,
+        tokenizer: Optional[PreTrainedTokenizer] = None,
+        config: Optional[PretrainedConfig] = None,
+        video: Optional["VideoInput"] = None,
+        audio: Optional[np.ndarray] = None,
+    ):
+        """
+        Preprocess inputs using the DotsOCR processor.
+        
+        The processor handles image preprocessing and creates the appropriate input format
+        including pixel_values, input_ids, attention_mask, and image_grid_thw.
+        """
+        if processor is None:
+            raise ValueError("Processor is required for DotsOCR")
+        
+        if video is not None:
+            raise ValueError("Video input is not supported for DotsOCR")
+        
+        if audio is not None:
+            raise ValueError("Audio input is not supported for DotsOCR")
+        
+        if image is None:
+            raise ValueError("Image is required for DotsOCR OCR tasks")
+        
+        # Create conversation format expected by the processor
+        conversation = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image"},
+                    {"type": "text", "text": text if text else "Extract text from this image."},
+                ],
+            }
+        ]
+        
+        # Apply chat template and process inputs
+        text_prompt = processor.apply_chat_template(conversation, add_generation_prompt=True, tokenize=False)
+        inputs = processor(images=image, text=[text_prompt], return_tensors="pt", padding=True)
+        
+        return inputs
+
+
 MODEL_TYPE_TO_CLS_MAPPING = {
     "llava": _OVLlavaForCausalLM,
     "llava_next": _OVLlavaNextForCausalLM,
@@ -4434,6 +4550,7 @@ MODEL_TYPE_TO_CLS_MAPPING = {
     "internvl_chat": _OVInternVLForCausalLM,
     "qwen2_vl": _OVQwen2VLForCausalLM,
     "qwen2_5_vl": _OVQwen2_5_VLForCausalLM,
+    "dots_ocr": _OVDotsOCRForCausalLM,
     "got_ocr2": _OVGotOCR2ForCausalLM,
     "gemma3": _OVGemma3ForCausalLM,
     "idefics3": _OVIdefics3ForCausalLM,
