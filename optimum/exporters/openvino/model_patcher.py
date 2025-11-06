@@ -1494,13 +1494,57 @@ def _phi3_self_attn_sdpa_forward(
 
 
 def select_ext_factor(
-    seq_len: torch.Tensor, max_pos_embeddings: torch.Tensor, short_factor: torch.Tensor, long_factor: torch.Tensor
+    position_ids: torch.Tensor, 
+    max_pos_embeddings: int, 
+    short_factor: torch.Tensor, 
+    long_factor: torch.Tensor,
+    alpha: float = 1.0
 ):
-    return torch.where(seq_len <= max_pos_embeddings, short_factor, long_factor)
+    """
+    Smoothly interpolate between short and long RoPE factors based on position.
+    
+    This avoids the KV cache incompatibility issue while maintaining accuracy:
+    - Positions far below threshold: use short_factor (original accuracy)
+    - Positions far above threshold: use long_factor (long context support)  
+    - Positions near threshold: smooth interpolation (avoids discontinuity)
+    
+    Args:
+        position_ids: [batch, seq_len] tensor of position indices
+        max_pos_embeddings: threshold position (e.g., 4096)
+        short_factor: [dim//2] tensor for short context
+        long_factor: [dim//2] tensor for long context
+        alpha: interpolation smoothness (higher = smoother transition)
+    
+    Returns:
+        [batch, dim//2, seq_len] tensor with interpolated factors
+    """
+    # Reshape for broadcasting
+    short_factor = short_factor[None, :, None]  # [1, dim//2, 1]
+    long_factor = long_factor[None, :, None]    # [1, dim//2, 1]
+    
+    # Compute smooth interpolation weight based on position
+    # Use sigmoid-like smooth transition around the threshold
+    # positions << threshold: weight ≈ 0 (use short)
+    # positions >> threshold: weight ≈ 1 (use long)
+    position_diff = (position_ids.float() - max_pos_embeddings) / (max_pos_embeddings * 0.1)  # normalize
+    smooth_weight = torch.sigmoid(position_diff * alpha)  # [batch, seq_len]
+    smooth_weight = smooth_weight.unsqueeze(1)  # [batch, 1, seq_len]
+    
+    # Interpolate: factor = short * (1 - weight) + long * weight
+    factors = short_factor * (1.0 - smooth_weight) + long_factor * smooth_weight
+    
+    return factors
 
 
 def long_rope(self, x, position_ids, seq_len=None):
-    seq_len = torch.max(position_ids) + 1
+    """
+    Long RoPE implementation with smooth interpolation for OpenVINO export.
+    
+    Uses position-dependent interpolation between short and long factors to:
+    1. Maintain accuracy for short contexts (positions ≤ 4096)
+    2. Enable long context support (positions > 4096)
+    3. Avoid KV cache incompatibility via smooth transitions
+    """
     original_max_position_embeddings = (
         self.original_max_position_embeddings
         if hasattr(self, "original_max_positional_embeddings")
@@ -1511,26 +1555,40 @@ def long_rope(self, x, position_ids, seq_len=None):
         if hasattr(self, "max_position_embeddings")
         else self.config.max_position_embeddings
     )
-    inv_freq = select_ext_factor(seq_len, original_max_position_embeddings, self.inv_freq, self.long_inv_freq)
-
-    inv_freq_expanded = inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
-    position_ids_expanded = position_ids[:, None, :].float()
-
-    # Force float32 since bfloat16 loses precision on long contexts
-    # See https://github.com/huggingface/transformers/pull/29285
+    
+    # Get position-dependent interpolated inv_freq
+    # Returns: [batch, dim//2, seq_len]
+    inv_freq = select_ext_factor(
+        position_ids, 
+        original_max_position_embeddings, 
+        self.inv_freq.float(), 
+        self.long_inv_freq.float(),
+        alpha=2.0  # Smooth transition over ~200 tokens around threshold
+    )
+    
+    # Expand position_ids: [batch, 1, seq_len]
+    position_ids_expanded = position_ids.unsqueeze(1).float()
+    
+    # Compute freqs with position-dependent inv_freq
+    # [batch, dim//2, seq_len] * [batch, 1, seq_len] -> [batch, dim//2, seq_len]
     device_type = x.device.type
     device_type = device_type if isinstance(device_type, str) and device_type != "mps" else "cpu"
-    freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
-    emb = torch.cat((freqs, freqs), dim=-1)
-
-    scale = max_position_embeddings / original_max_position_embeddings
-    if scale <= 1.0:
-        scaling_factor = 1.0
-    else:
-        scaling_factor = math.sqrt(1 + math.log(scale) / math.log(original_max_position_embeddings))
-    cos = emb.cos() * scaling_factor
-    sin = emb.sin() * scaling_factor
-    return cos, sin
+    
+    with torch.autocast(device_type=device_type, enabled=False):
+        freqs = inv_freq * position_ids_expanded
+        freqs = freqs.transpose(1, 2)  # [batch, seq_len, dim//2]
+        emb = torch.cat((freqs, freqs), dim=-1)  # [batch, seq_len, dim]
+        
+        scale = max_position_embeddings / original_max_position_embeddings
+        if scale <= 1.0:
+            scaling_factor = 1.0
+        else:
+            scaling_factor = math.sqrt(1 + math.log(scale) / math.log(original_max_position_embeddings))
+        
+        cos = emb.cos() * scaling_factor
+        sin = emb.sin() * scaling_factor
+    
+    return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
 
 class Phi3ModelPatcher(OVDecoderModelPatcher):
