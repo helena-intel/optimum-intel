@@ -1501,49 +1501,41 @@ def select_ext_factor(
     alpha: float = 1.0
 ):
     """
-    Smoothly interpolate between short and long RoPE factors based on position.
+    NOTE: This function is kept for reference but NOT used in long_rope().
     
-    This avoids the KV cache incompatibility issue while maintaining accuracy:
-    - Positions far below threshold: use short_factor (original accuracy)
-    - Positions far above threshold: use long_factor (long context support)  
-    - Positions near threshold: smooth interpolation (avoids discontinuity)
+    Dynamic position-based or max-position-based switching is fundamentally incompatible
+    with KV caching in exported models because:
+    1. Cached K/V are computed with one RoPE variant
+    2. When crossing threshold, new tokens use different RoPE variant
+    3. Comparing incompatible embeddings in attention causes random outputs
+    4. Cannot invalidate/recompute cache in exported static model
     
-    Args:
-        position_ids: [batch, seq_len] tensor of position indices
-        max_pos_embeddings: threshold position (e.g., 4096)
-        short_factor: [dim//2] tensor for short context
-        long_factor: [dim//2] tensor for long context
-        alpha: interpolation smoothness (higher = smoother transition)
-    
-    Returns:
-        [batch, dim//2, seq_len] tensor with interpolated factors
+    The only viable solution for exported models is FIXED interpolation (see long_rope).
     """
-    # Reshape for broadcasting
-    short_factor = short_factor[None, :, None]  # [1, dim//2, 1]
-    long_factor = long_factor[None, :, None]    # [1, dim//2, 1]
-    
-    # Compute smooth interpolation weight based on position
-    # Use sigmoid-like smooth transition around the threshold
-    # positions << threshold: weight ≈ 0 (use short)
-    # positions >> threshold: weight ≈ 1 (use long)
-    position_diff = (position_ids.float() - max_pos_embeddings) / (max_pos_embeddings * 0.1)  # normalize
-    smooth_weight = torch.sigmoid(position_diff * alpha)  # [batch, seq_len]
-    smooth_weight = smooth_weight.unsqueeze(1)  # [batch, 1, seq_len]
-    
-    # Interpolate: factor = short * (1 - weight) + long * weight
+    short_factor = short_factor[None, :, None]
+    long_factor = long_factor[None, :, None]
+    position_diff = (position_ids.float() - max_pos_embeddings) / (max_pos_embeddings * 0.1)
+    smooth_weight = torch.sigmoid(position_diff * alpha)
+    smooth_weight = smooth_weight.unsqueeze(1)
     factors = short_factor * (1.0 - smooth_weight) + long_factor * smooth_weight
-    
     return factors
 
 
 def long_rope(self, x, position_ids, seq_len=None):
     """
-    Long RoPE implementation with smooth interpolation for OpenVINO export.
+    Long RoPE implementation for OpenVINO export.
     
-    Uses position-dependent interpolation between short and long factors to:
-    1. Maintain accuracy for short contexts (positions ≤ 4096)
-    2. Enable long context support (positions > 4096)
-    3. Avoid KV cache incompatibility via smooth transitions
+    CRITICAL INSIGHT: For exported models with KV caching, we CANNOT dynamically switch
+    RoPE strategies because cached K/V would become incompatible. We must choose ONE
+    consistent strategy at export time.
+    
+    Strategy: Use a FIXED interpolation between short and long factors that provides:
+    - Reasonable accuracy for short contexts
+    - Full support for long contexts
+    - Consistent embeddings across all positions (no cache incompatibility)
+    
+    We use a 75/25 blend: 75% long (for long context support) + 25% short (to preserve
+    some short context accuracy). This is a compromise that works across all lengths.
     """
     original_max_position_embeddings = (
         self.original_max_position_embeddings
@@ -1556,28 +1548,25 @@ def long_rope(self, x, position_ids, seq_len=None):
         else self.config.max_position_embeddings
     )
     
-    # Get position-dependent interpolated inv_freq
-    # Returns: [batch, dim//2, seq_len]
-    inv_freq = select_ext_factor(
-        position_ids, 
-        original_max_position_embeddings, 
-        self.inv_freq.float(), 
-        self.long_inv_freq.float(),
-        alpha=2.0  # Smooth transition over ~200 tokens around threshold
-    )
+    # FIXED blend: 75% long + 25% short
+    # This ensures ALL positions always use the same RoPE variant
+    # Adjust blend_weight based on your use case:
+    # - 1.0 = pure long (best for long context, some short context loss)
+    # - 0.75 = 75% long (good balance)
+    # - 0.5 = 50/50 (more short context accuracy, less long context capability)
+    blend_weight = 0.75
+    inv_freq = self.inv_freq.float() * (1.0 - blend_weight) + self.long_inv_freq.float() * blend_weight
     
-    # Expand position_ids: [batch, 1, seq_len]
-    position_ids_expanded = position_ids.unsqueeze(1).float()
+    # Compute RoPE with the fixed blended inv_freq
+    inv_freq_expanded = inv_freq[None, :, None].expand(position_ids.shape[0], -1, 1)
+    position_ids_expanded = position_ids[:, None, :].float()
     
-    # Compute freqs with position-dependent inv_freq
-    # [batch, dim//2, seq_len] * [batch, 1, seq_len] -> [batch, dim//2, seq_len]
     device_type = x.device.type
     device_type = device_type if isinstance(device_type, str) and device_type != "mps" else "cpu"
     
     with torch.autocast(device_type=device_type, enabled=False):
-        freqs = inv_freq * position_ids_expanded
-        freqs = freqs.transpose(1, 2)  # [batch, seq_len, dim//2]
-        emb = torch.cat((freqs, freqs), dim=-1)  # [batch, seq_len, dim]
+        freqs = (inv_freq_expanded @ position_ids_expanded).transpose(1, 2)
+        emb = torch.cat((freqs, freqs), dim=-1)
         
         scale = max_position_embeddings / original_max_position_embeddings
         if scale <= 1.0:
