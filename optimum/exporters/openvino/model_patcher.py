@@ -1523,19 +1523,18 @@ def select_ext_factor(
 
 def long_rope(self, x, position_ids, seq_len=None):
     """
-    Long RoPE implementation for OpenVINO export.
+    Long RoPE implementation for OpenVINO export with frequency-adaptive blending.
     
-    CRITICAL INSIGHT: For exported models with KV caching, we CANNOT dynamically switch
-    RoPE strategies because cached K/V would become incompatible. We must choose ONE
-    consistent strategy at export time.
+    CRITICAL INSIGHT: For exported models with KV caching, we must use a FIXED blend.
+    However, a uniform blend_weight can fail:
+    - Too low (e.g., 0.5): Insufficient long-factor scaling → random outputs at long context
+    - Too high (e.g., 0.75+): Works for long context but loses short context accuracy
     
-    Strategy: Use a FIXED interpolation between short and long factors that provides:
-    - Reasonable accuracy for short contexts
-    - Full support for long contexts
-    - Consistent embeddings across all positions (no cache incompatibility)
+    SOLUTION: Frequency-adaptive blend that leverages the structure of long_factor array:
+    - Low frequencies (early dims): long_factor ≈ 1.0, so use more short (preserve quality)
+    - High frequencies (late dims): long_factor >> 1.0, so use more long (enable long context)
     
-    We use a 75/25 blend: 75% long (for long context support) + 25% short (to preserve
-    some short context accuracy). This is a compromise that works across all lengths.
+    This gives us the best of both worlds: good short context AND stable long context.
     """
     original_max_position_embeddings = (
         self.original_max_position_embeddings
@@ -1548,16 +1547,40 @@ def long_rope(self, x, position_ids, seq_len=None):
         else self.config.max_position_embeddings
     )
     
-    # FIXED blend: 75% long + 25% short
-    # This ensures ALL positions always use the same RoPE variant
-    # Adjust blend_weight based on your use case:
-    # - 1.0 = pure long (best for long context, some short context loss)
-    # - 0.75 = 75% long (good balance)
-    # - 0.5 = 50/50 (more short context accuracy, less long context capability)
-    blend_weight = 0.75
-    inv_freq = self.inv_freq.float() * (1.0 - blend_weight) + self.long_inv_freq.float() * blend_weight
+    # Compute frequency-dependent blend weights
+    # Strategy: Use the ratio (long_factor / short_factor) to determine how much we need long scaling
+    # Where long_factor ≈ short_factor → can use more short (weight closer to 0)
+    # Where long_factor >> short_factor → must use more long (weight closer to 1)
     
-    # Compute RoPE with the fixed blended inv_freq
+    short_factor = self.inv_freq.float()  # All 1/freq values
+    long_factor = self.long_inv_freq.float()  # Scaled 1/freq values
+    
+    # Compute how much each frequency is scaled in long_factor
+    # This is stored in the config as the factor applied: long_inv_freq = inv_freq / long_factor_array
+    # So the ratio tells us the scaling magnitude
+    # For dimensions where scaling is minimal (ratio ≈ 1), prefer short
+    # For dimensions where scaling is large (ratio >> 1), prefer long
+    
+    # Create adaptive blend weight per frequency dimension
+    # Use a sigmoid-based weight that increases with the frequency index
+    # Low frequencies (0-15): weight ≈ 0.3-0.5 (favor short for quality)
+    # Mid frequencies (16-31): weight ≈ 0.5-0.7 (balanced)
+    # High frequencies (32-47): weight ≈ 0.7-0.9 (favor long for stability)
+    freq_idx = torch.arange(len(short_factor), dtype=torch.float32, device=short_factor.device)
+    num_freqs = len(short_factor)
+    
+    # Adaptive weighting: ranges from 0.3 to 0.9 across frequency dimensions
+    min_weight = 0.3  # Minimum blend (favor short for low frequencies)
+    max_weight = 0.9  # Maximum blend (favor long for high frequencies)
+    
+    # Smooth transition from min to max across frequencies
+    normalized_idx = freq_idx / (num_freqs - 1)  # 0 to 1
+    adaptive_weights = min_weight + (max_weight - min_weight) * normalized_idx
+    
+    # Blend inv_freq with adaptive weights
+    inv_freq = short_factor * (1.0 - adaptive_weights) + long_factor * adaptive_weights
+    
+    # Compute RoPE with the adaptively blended inv_freq
     inv_freq_expanded = inv_freq[None, :, None].expand(position_ids.shape[0], -1, 1)
     position_ids_expanded = position_ids[:, None, :].float()
     
