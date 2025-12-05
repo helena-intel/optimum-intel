@@ -27,7 +27,7 @@ from optimum.intel.utils.import_utils import is_openvino_version, is_transformer
 
 SEED = 42
 
-F32_CONFIG = {"INFERENCE_PRECISION_HINT": "f32"}
+F32_CONFIG = {"EXECUTION_MODE_HINT": "ACCURACY"}
 
 TENSOR_ALIAS_TO_TYPE = {"pt": torch.Tensor, "np": np.ndarray}
 
