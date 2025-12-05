@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Union
 
 from huggingface_hub.constants import HUGGINGFACE_HUB_CACHE
 from requests.exceptions import ConnectionError as RequestsConnectionError
-from transformers import AutoConfig, AutoTokenizer, PreTrainedTokenizerBase, ProcessorMixin
+from transformers import AutoConfig, AutoTokenizer, PreTrainedTokenizerBase, ProcessorMixin, set_seed
 from transformers.utils import is_torch_available
 
 from openvino import Core, Type, save_model
@@ -131,6 +131,7 @@ def main_export(
     library_name: Optional[str] = None,
     model_loading_kwargs: Optional[Dict[str, Any]] = None,
     variant: Optional[str] = None,
+    seed: Optional[int] = None,
     **kwargs_shapes,
 ):
     """
@@ -408,6 +409,9 @@ def main_export(
             patch_16bit = True
         if loading_kwargs.get("torch_dtype") == "auto":
             loading_kwargs["torch_dtype"] = dtype
+
+    if seed is not None:
+        set_seed(seed)
 
     try:
         if library_name == "open_clip":

@@ -293,6 +293,12 @@ def parse_args_openvino(parser: "ArgumentParser"):
         type=json.loads,
         help=("Any kwargs passed to the model forward, or used to customize the export for a given model."),
     )
+    optional_group.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for reproducibility.",
+    )
 
 
 def no_compression_parameter_provided(args):
@@ -587,6 +593,7 @@ class OVExportCommand(BaseOptimumCLICommand):
                 library_name=library_name,
                 variant=self.args.variant,
                 model_kwargs=self.args.model_kwargs,
+                seed=self.args.seed,
                 # **input_shapes,
             )
 

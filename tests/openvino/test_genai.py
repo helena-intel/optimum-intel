@@ -1,4 +1,5 @@
 import os
+import subprocess
 import tempfile
 import unittest
 
@@ -6,12 +7,7 @@ import numpy as np
 import openvino as ov
 import requests
 import torch
-from openvino_genai import (
-    LLMPipeline,
-    Text2SpeechPipeline,
-    VLMPipeline,
-    WhisperPipeline,
-)
+from openvino_genai import LLMPipeline, Text2SpeechPipeline, VLMPipeline, WhisperPipeline
 from parameterized import parameterized
 from PIL import Image
 from transformers import (
@@ -25,7 +21,6 @@ from transformers import (
 )
 from utils_tests import F32_CONFIG, MODEL_NAMES, OPENVINO_DEVICE, TEST_IMAGE_URL
 
-from optimum.exporters.openvino import main_export
 from optimum.intel.openvino import (
     OVModelForCausalLM,
     OVModelForSpeechSeq2Seq,
@@ -36,6 +31,14 @@ from optimum.utils import is_transformers_version
 
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+
+def export_model(model_id, task, output_dir, trust_remote_code=False):
+    cli_args = ["optimum-cli", "export", "openvino", "--model", model_id, "--task", task, "--seed", "42"]
+    if trust_remote_code:
+        cli_args.append("--trust-remote-code")
+    cli_args.append(output_dir)
+    subprocess.run(cli_args, check=True)
 
 
 class LLMPipelineTestCase(unittest.TestCase):
@@ -149,19 +152,12 @@ class LLMPipelineTestCase(unittest.TestCase):
         set_seed(42)
         transformers_model = AutoModelForCausalLM.from_pretrained(model_id, trust_remote_code=trust_remote_code).eval()
 
-        with tempfile.TemporaryDirectory() as tmpdirname:
-            set_seed(42)
-            main_export(
-                model_name_or_path=model_id,
-                task="text-generation-with-past",
-                trust_remote_code=trust_remote_code,
-                convert_tokenizer=True,
-                output=tmpdirname,
-            )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            export_model(model_id, "text-generation-with-past", tmpdir, trust_remote_code=trust_remote_code)
             optimum_model = OVModelForCausalLM.from_pretrained(
-                tmpdirname, trust_remote_code=trust_remote_code, device=OPENVINO_DEVICE, ov_config=F32_CONFIG
+                tmpdir, trust_remote_code=trust_remote_code, device=OPENVINO_DEVICE, ov_config=F32_CONFIG
             )
-            genai_model = LLMPipeline(tmpdirname, device=OPENVINO_DEVICE, **F32_CONFIG)
+            genai_model = LLMPipeline(tmpdir, device=OPENVINO_DEVICE, **F32_CONFIG)
 
         prompt = "Paris is the capital of"
         tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=trust_remote_code)
@@ -272,19 +268,12 @@ class VLMPipelineTestCase(unittest.TestCase):
         transformers_class = self._get_model_class(model_arch)
         transformers_model = transformers_class.from_pretrained(model_id, trust_remote_code=trust_remote_code).eval()
 
-        with tempfile.TemporaryDirectory() as tmpdirname:
-            set_seed(42)
-            main_export(
-                model_name_or_path=model_id,
-                trust_remote_code=trust_remote_code,
-                task="image-text-to-text",
-                convert_tokenizer=True,
-                output=tmpdirname,
-            )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            export_model(model_id, "image-text-to-text", tmpdir, trust_remote_code=trust_remote_code)
             optimum_model = OVModelForVisualCausalLM.from_pretrained(
-                tmpdirname, device=OPENVINO_DEVICE, ov_config=F32_CONFIG, trust_remote_code=trust_remote_code
+                tmpdir, device=OPENVINO_DEVICE, ov_config=F32_CONFIG, trust_remote_code=trust_remote_code
             )
-            genai_model = VLMPipeline(tmpdirname, device=OPENVINO_DEVICE, **F32_CONFIG)
+            genai_model = VLMPipeline(tmpdir, device=OPENVINO_DEVICE, **F32_CONFIG)
 
         image = self.IMAGE
         prompt = "A photo of a cat sitting on a"
@@ -343,18 +332,12 @@ class Speeh2TextPipelineTestCase(unittest.TestCase):
         set_seed(42)
         transformers_model = AutoModelForSpeechSeq2Seq.from_pretrained(model_id).eval()
 
-        with tempfile.TemporaryDirectory() as tmpdirname:
-            set_seed(42)
-            main_export(
-                model_name_or_path=model_id,
-                task="automatic-speech-recognition-with-past",
-                convert_tokenizer=True,
-                output=tmpdirname,
-            )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            export_model(model_id, "automatic-speech-recognition-with-past", tmpdir)
             optimum_model = OVModelForSpeechSeq2Seq.from_pretrained(
-                tmpdirname, device=OPENVINO_DEVICE, ov_config=F32_CONFIG
+                tmpdir, device=OPENVINO_DEVICE, ov_config=F32_CONFIG
             )
-            genai_model = WhisperPipeline(tmpdirname, device=OPENVINO_DEVICE, **F32_CONFIG)
+            genai_model = WhisperPipeline(tmpdir, device=OPENVINO_DEVICE, **F32_CONFIG)
 
         audio = self._get_audio()
         processor = AutoProcessor.from_pretrained(model_id)
@@ -406,19 +389,12 @@ class Text2SpeechPipelineTestCase(unittest.TestCase):
         set_seed(42)
         transformers_model = AutoModelForTextToSpectrogram.from_pretrained(model_id).eval()
 
-        with tempfile.TemporaryDirectory() as tmpdirname:
-            set_seed(42)
-            main_export(
-                model_name_or_path=model_id,
-                task="text-to-audio-with-past",
-                model_kwargs={"vocoder": self.VOCODER},
-                convert_tokenizer=True,
-                output=tmpdirname,
-            )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            export_model(model_id, "text-to-audio-with-past", tmpdir)
             optimum_model = OVModelForTextToSpeechSeq2Seq.from_pretrained(
-                tmpdirname, device=OPENVINO_DEVICE, ov_config=F32_CONFIG
+                tmpdir, device=OPENVINO_DEVICE, ov_config=F32_CONFIG
             )
-            genai_model = Text2SpeechPipeline(tmpdirname, device=OPENVINO_DEVICE, **F32_CONFIG)
+            genai_model = Text2SpeechPipeline(tmpdir, device=OPENVINO_DEVICE, **F32_CONFIG)
 
         text = "Hello, how are you?"
         processor = AutoProcessor.from_pretrained(model_id)
