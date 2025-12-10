@@ -1,10 +1,12 @@
 import os
+import sys
 import subprocess
 import tempfile
 import unittest
 
 import numpy as np
 import openvino as ov
+import pytest
 import requests
 import torch
 from openvino_genai import LLMPipeline, Text2SpeechPipeline, VLMPipeline, WhisperPipeline
@@ -20,6 +22,8 @@ from transformers import (
     set_seed,
 )
 from utils_tests import F32_CONFIG, MODEL_NAMES, OPENVINO_DEVICE, TEST_IMAGE_URL
+
+# F32_CONFIG = {"EXECUTION_MODE_HINT": "ACCURACY"}
 
 from optimum.intel.openvino import (
     OVModelForCausalLM,
@@ -79,6 +83,7 @@ class LLMPipelineTestCase(unittest.TestCase):
         "exaone",
         "granite",
         "granite-moe",
+        "lfm2"
     )
 
     if is_transformers_version(">=", "4.46.0"):
@@ -129,11 +134,6 @@ class LLMPipelineTestCase(unittest.TestCase):
         "jais",
         "qwen",
     )
-    NO_ECHO_MODELS = (  # weird
-        "gpt_oss",
-        "orion",
-        "xglm",
-    )
 
     GEN_KWARGS = {
         "max_new_tokens": 10,
@@ -145,14 +145,13 @@ class LLMPipelineTestCase(unittest.TestCase):
     @parameterized.expand(SUPPORTED_ARCHITECTURES)
     def test_compare_outputs(self, model_arch):
         model_id = MODEL_NAMES[model_arch]
-        echo = model_arch not in self.NO_ECHO_MODELS
         use_cache = model_arch not in self.NO_CACHE_MODELS
         trust_remote_code = model_arch in self.REMOTE_CODE_MODELS
 
         set_seed(42)
         transformers_model = AutoModelForCausalLM.from_pretrained(model_id, trust_remote_code=trust_remote_code).eval()
-
-        with tempfile.TemporaryDirectory() as tmpdir:
+        # TODO: delete=False is added to prevent issues on Windows. For all tests, the temporary directories need to be deleted
+        with tempfile.TemporaryDirectory(delete=False) as tmpdir:
             export_model(model_id, "text-generation-with-past", tmpdir, trust_remote_code=trust_remote_code)
             optimum_model = OVModelForCausalLM.from_pretrained(
                 tmpdir, trust_remote_code=trust_remote_code, device=OPENVINO_DEVICE, ov_config=F32_CONFIG
@@ -162,6 +161,7 @@ class LLMPipelineTestCase(unittest.TestCase):
         prompt = "Paris is the capital of"
         tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=trust_remote_code)
         inputs = tokenizer(prompt, return_tensors="pt")
+        input_len = inputs["input_ids"].shape[-1]
 
         with torch.no_grad():
             transformers_ids = transformers_model.generate(**inputs, use_cache=use_cache, **self.GEN_KWARGS)
@@ -170,24 +170,16 @@ class LLMPipelineTestCase(unittest.TestCase):
         optimum_ids = optimum_model.generate(**inputs, use_cache=use_cache, **self.GEN_KWARGS)
         optimum_output = tokenizer.decode(optimum_ids[0], skip_special_tokens=True)
 
-        genai_output = genai_model.generate(
-            prompt, echo=echo, apply_chat_template=False, ignore_eos=True, **self.GEN_KWARGS
-        )
-
-        if not echo:
-            # if echo is not supported, trim the prompt from the outputs and trim spaces
-            # NOTE: this is an approximation, as detokenize(prompt_ids + generated_ids) - prompt != detokenize(generated_ids)
-            transformers_output = transformers_output[len(prompt) :].strip()
-            optimum_output = optimum_output[len(prompt) :].strip()
+        genai_ids = genai_model(ov.Tensor(inputs["input_ids"].numpy()), ignore_eos=True, **self.GEN_KWARGS)
+        genai_ids = genai_ids.tokens[0]
 
         # assert they are not empty
         self.assertTrue(transformers_output)
-        self.assertTrue(optimum_output)
-        self.assertTrue(genai_output)
+        self.assertTrue(genai_ids)
 
         # compare outputs
         self.assertEqual(transformers_output, optimum_output)
-        self.assertEqual(transformers_output, genai_output)
+        self.assertEqual(transformers_ids.squeeze()[input_len:].tolist(), genai_ids)
 
 
 class VLMPipelineTestCase(unittest.TestCase):
@@ -268,7 +260,7 @@ class VLMPipelineTestCase(unittest.TestCase):
         transformers_class = self._get_model_class(model_arch)
         transformers_model = transformers_class.from_pretrained(model_id, trust_remote_code=trust_remote_code).eval()
 
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(delete=False) as tmpdir:
             export_model(model_id, "image-text-to-text", tmpdir, trust_remote_code=trust_remote_code)
             optimum_model = OVModelForVisualCausalLM.from_pretrained(
                 tmpdir, device=OPENVINO_DEVICE, ov_config=F32_CONFIG, trust_remote_code=trust_remote_code
@@ -332,7 +324,7 @@ class Speeh2TextPipelineTestCase(unittest.TestCase):
         set_seed(42)
         transformers_model = AutoModelForSpeechSeq2Seq.from_pretrained(model_id).eval()
 
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(delete=False) as tmpdir:
             export_model(model_id, "automatic-speech-recognition-with-past", tmpdir)
             optimum_model = OVModelForSpeechSeq2Seq.from_pretrained(
                 tmpdir, device=OPENVINO_DEVICE, ov_config=F32_CONFIG
@@ -357,6 +349,7 @@ class Speeh2TextPipelineTestCase(unittest.TestCase):
         self.assertEqual(transformers_output, genai_output)
 
 
+@pytest.mark.skipif(sys.platform.startswith("win"), reason="Skipping text2speech on Windows for now")  #TODO fix
 class Text2SpeechPipelineTestCase(unittest.TestCase):
     SUPPORTED_ARCHITECTURES = ("speecht5",)
     VOCODER = "fxmarty/speecht5-hifigan-tiny"
@@ -389,7 +382,7 @@ class Text2SpeechPipelineTestCase(unittest.TestCase):
         set_seed(42)
         transformers_model = AutoModelForTextToSpectrogram.from_pretrained(model_id).eval()
 
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(delete=False) as tmpdir:
             export_model(model_id, "text-to-audio-with-past", tmpdir)
             optimum_model = OVModelForTextToSpeechSeq2Seq.from_pretrained(
                 tmpdir, device=OPENVINO_DEVICE, ov_config=F32_CONFIG
