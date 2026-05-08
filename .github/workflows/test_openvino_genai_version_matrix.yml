@@ -2,6 +2,14 @@ name: OpenVINO GenAI - Version Matrix
 
 on:
   workflow_dispatch:
+    inputs:
+      os:
+        description: "Runner OS"
+        type: choice
+        options:
+          - windows-latest
+          - ubuntu-24.04
+        default: windows-latest
   push:
     branches:
       - main
@@ -75,9 +83,9 @@ jobs:
       fail-fast: false
       matrix:
         transformers-version: ${{ fromJson(needs.build-matrix.outputs.versions) }}
-        os: [ubuntu-24.04, windows-latest]
+        openvino-version: ["2026.0.*", "latest"]
 
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ inputs.os || 'windows-latest' }}
 
     steps:
       - name: Checkout code
@@ -96,6 +104,11 @@ jobs:
       - name: Install transformers
         run: |
           uv pip install "transformers==${{ matrix.transformers-version }}"
+
+      - name: Install OpenVINO
+        if: matrix.openvino-version != 'latest'
+        run: |
+          uv pip install "openvino==${{ matrix.openvino-version }}" "openvino-tokenizers==${{ matrix.openvino-version }}" "openvino-genai==${{ matrix.openvino-version }}"
 
       - name: Login with fork PRs CI token
         if: ${{ env.HF_TOKEN == '' }}
