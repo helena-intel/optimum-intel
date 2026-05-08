@@ -117,4 +117,4 @@ jobs:
 
       - name: Test with Pytest
         run: |
-          pytest tests/openvino/test_genai.py --durations=0
+          python -m pytest tests/openvino/test_genai.py -p no:faulthandler --durations=0
