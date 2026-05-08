@@ -26,6 +26,7 @@ env:
   UV_TORCH_BACKEND: cpu
   UV_SYSTEM_PYTHON: true
   TRANSFORMERS_IS_CI: true
+  PYTHONUNBUFFERED: "1"
   HF_TOKEN: ${{ secrets.HF_HUB_READ_TOKEN }}
 
 jobs:
@@ -62,7 +63,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -92,7 +93,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -115,6 +116,71 @@ jobs:
         run: |
           python tests/scripts/login_with_ci_token.py
 
+      - name: Verify imports
+        run: |
+          python -c "import openvino_genai; print('openvino_genai', openvino_genai.__version__)"
+          python -c "import openvino; print('openvino', openvino.__version__)"
+          python -c "import transformers; print('transformers', transformers.__version__)"
+          python -c "import torch; print('torch', torch.__version__)"
+
+      - name: Debug imports step by step
+        shell: python
+        run: |
+          import sys
+          print('1. torch...', flush=True)
+          import torch
+          print('   OK', flush=True)
+
+          print('2. openvino...', flush=True)
+          import openvino as ov
+          print('   OK', flush=True)
+
+          print('3. openvino_genai...', flush=True)
+          from openvino_genai import LLMPipeline, VLMPipeline, WhisperPipeline, Text2SpeechPipeline, draft_model
+          print('   OK', flush=True)
+
+          print('4. transformers...', flush=True)
+          from transformers import AutoModelForCausalLM, AutoTokenizer, AutoProcessor, AutoConfig, AutoModelForSpeechSeq2Seq, AutoModelForTextToSpectrogram, set_seed
+          print('   OK', flush=True)
+
+          print('5. optimum.exporters.openvino...', flush=True)
+          from optimum.exporters.openvino import main_export
+          print('   OK', flush=True)
+
+          print('6a. modeling_base...', flush=True)
+          from optimum.intel.openvino.modeling_base import OVBaseModel
+          print('   OK', flush=True)
+
+          print('6b. modeling...', flush=True)
+          from optimum.intel.openvino.modeling import OVModel
+          print('   OK', flush=True)
+
+          print('6c. modeling_decoder...', flush=True)
+          from optimum.intel.openvino.modeling_decoder import OVModelForCausalLM
+          print('   OK', flush=True)
+
+          print('6d. modeling_open_clip...', flush=True)
+          from optimum.intel.openvino.modeling_open_clip import OVCLIPVisionModel
+          print('   OK', flush=True)
+
+          print('6e. modeling_sam...', flush=True)
+          from optimum.intel.openvino.modeling_sam import OVSamModel
+          print('   OK', flush=True)
+
+          print('6f. modeling_seq2seq...', flush=True)
+          from optimum.intel.openvino.modeling_seq2seq import OVModelForSeq2SeqLM
+          print('   OK', flush=True)
+
+          print('6g. modeling_visual_language...', flush=True)
+          from optimum.intel.openvino.modeling_visual_language import OVModelForVisualCausalLM
+          print('   OK', flush=True)
+
+          print('All imports successful!', flush=True)
+
+      - name: Verify test collection
+        run: |
+          python -m pytest tests/openvino/test_genai.py --collect-only -q
+
       - name: Test with Pytest
         run: |
-          python -m pytest tests/openvino/test_genai.py -p no:faulthandler --durations=0
+          python -m pytest tests/openvino/test_genai.py --durations=0
