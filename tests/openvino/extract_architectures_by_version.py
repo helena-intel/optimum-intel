@@ -8,6 +8,8 @@ The version list is built automatically from min/max bounds in setup.py
 (the transformers requirement specifier), iterating over each minor version.
 """
 
+# ruff: noqa: I001  # Avoid black/ruff conflict
+
 import importlib
 import re
 from pathlib import Path

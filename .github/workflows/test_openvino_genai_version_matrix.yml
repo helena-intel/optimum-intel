@@ -104,4 +104,4 @@ jobs:
 
       - name: Test with Pytest
         run: |
-          pytest tests/openvino/*genai* --durations=0
+          pytest tests/openvino/test_genai.py --durations=0
