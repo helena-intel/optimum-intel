@@ -1,0 +1,107 @@
+name: OpenVINO GenAI - Version Matrix
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - v*-release
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  UV_TORCH_BACKEND: cpu
+  UV_SYSTEM_PYTHON: true
+  TRANSFORMERS_IS_CI: true
+  HF_TOKEN: ${{ secrets.HF_HUB_READ_TOKEN }}
+
+jobs:
+  check-relevance:
+    runs-on: ubuntu-24.04
+    outputs:
+      should-run: ${{ steps.check.outputs.should-run }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      # only run on push to main if either this workflow file or extract_architectures script changed
+      - name: Check if relevant files changed
+        id: check
+        run: |
+          if [[ "${{ github.ref }}" != "refs/heads/main" || "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "should-run=true" >> "$GITHUB_OUTPUT"
+          elif git diff --name-only HEAD~1 | grep -qE '(\.github/workflows/test_openvino_genai_version_matrix\.yml|tests/openvino/extract_architectures_by_version\.py)'; then
+            echo "should-run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should-run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build-matrix:
+    needs: check-relevance
+    if: needs.check-relevance.outputs.should-run == 'true'
+    runs-on: ubuntu-24.04
+    outputs:
+      versions: ${{ steps.get-versions.outputs.versions }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip uv
+          uv pip install .[tests]
+
+      - name: Get transformers versions
+        id: get-versions
+        run: |
+          versions=$(python tests/openvino/extract_architectures_by_version.py --json-versions)
+          echo "versions=$versions" >> "$GITHUB_OUTPUT"
+
+  test:
+    needs: build-matrix
+    strategy:
+      fail-fast: false
+      matrix:
+        transformers-version: ${{ fromJson(needs.build-matrix.outputs.versions) }}
+        os: [ubuntu-24.04, windows-latest]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip uv
+          uv pip install .[tests]
+
+      - name: Install transformers
+        run: |
+          uv pip install "transformers==${{ matrix.transformers-version }}"
+
+      - name: Login with fork PRs CI token
+        if: ${{ env.HF_TOKEN == '' }}
+        run: |
+          python tests/scripts/login_with_ci_token.py
+
+      - name: Test with Pytest
+        run: |
+          pytest tests/openvino/*genai* --durations=0
