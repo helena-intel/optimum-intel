@@ -160,7 +160,7 @@ jobs:
           print('   OK', flush=True)
 
           print('6d. modeling_open_clip...', flush=True)
-          from optimum.intel.openvino.modeling_open_clip import OVCLIPVisionModel
+          from optimum.intel.openvino.modeling_open_clip import OVModelOpenCLIPForZeroShotImageClassification
           print('   OK', flush=True)
 
           print('6e. modeling_sam...', flush=True)
