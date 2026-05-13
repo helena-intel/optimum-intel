@@ -100,16 +100,12 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip uv
-          uv pip install .[tests]
-
-      - name: Install transformers
-        run: |
-          uv pip install "transformers==${{ matrix.transformers-version }}"
+          uv pip install .[tests] "transformers==${{ matrix.transformers-version }}"
 
       - name: Install OpenVINO
         if: matrix.openvino-version != 'latest'
         run: |
-          uv pip install "openvino==${{ matrix.openvino-version }}" "openvino-tokenizers==${{ matrix.openvino-version }}" "openvino-genai==${{ matrix.openvino-version }}"
+          uv pip install --reinstall "openvino==${{ matrix.openvino-version }}" "openvino-tokenizers==${{ matrix.openvino-version }}" "openvino-genai==${{ matrix.openvino-version }}"
 
       - name: Login with fork PRs CI token
         if: ${{ env.HF_TOKEN == '' }}
