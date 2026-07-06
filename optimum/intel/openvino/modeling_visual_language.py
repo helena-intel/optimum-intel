@@ -5106,7 +5106,6 @@ class _OVVideoChatFlashQwenForCausalLM(OVModelForVisualCausalLM):
                 snapshot_dir = snapshot_download(
                     repo_id=model_ref,
                     allow_patterns=["*.py", "*.json"],
-                    local_files_only=True,
                 )
                 model_dir = Path(snapshot_dir).resolve()
             except Exception as e:
