@@ -52,6 +52,8 @@ from utils_tests import (
     OPENVINO_DEVICE,
     REMOTE_CODE_MODELS,
     TEST_IMAGE_URL,
+    TEST_NAME_TO_MODEL_TYPE,
+    get_supported_model_for_library,
 )
 
 from optimum.exporters.openvino import main_export
@@ -218,6 +220,10 @@ class LLMPipelineTestCase(unittest.TestCase):
         if arch not in _GENAI_LLM_UNSUPPORTED_ARCHITECTURES
     )
 
+    # remote modeling incompatible with v5 but not filtered as CodeGenOpenVINOConfig is compatible (codegen)
+    if is_transformers_version("<", "5"):
+        ALL_SUPPORTED_ARCHITECTURES += ("codegen2",)
+
     # to be expanded, other architectures work on NPU too
     # qwen2, phi and phi3 tests are flaky on NPU, not including for now
     # TODO, these models work on NPU and should be included in tests:
@@ -229,6 +235,12 @@ class LLMPipelineTestCase(unittest.TestCase):
     # NPU_SUPPORTED_ARCHITECTURES = ALL_SUPPORTED_ARCHITECTURES
 
     SUPPORTED_ARCHITECTURES = NPU_SUPPORTED_ARCHITECTURES if OPENVINO_DEVICE == "NPU" else ALL_SUPPORTED_ARCHITECTURES
+    # filter architectures depending on min/max transformers supported versions
+    SUPPORTED_ARCHITECTURES = tuple(
+        arch
+        for arch in SUPPORTED_ARCHITECTURES
+        if TEST_NAME_TO_MODEL_TYPE.get(arch, arch) in get_supported_model_for_library("transformers")
+    )
 
     REMOTE_CODE_MODELS = REMOTE_CODE_MODELS
     NO_CACHE_MODELS = (  # mostly remote that are broken with past key values
@@ -355,6 +367,12 @@ class VLMPipelineTestCase(unittest.TestCase):
     NPU_SUPPORTED_ARCHITECTURES = ("qwen2_vl", "qwen2_5_vl")
 
     SUPPORTED_ARCHITECTURES = NPU_SUPPORTED_ARCHITECTURES if OPENVINO_DEVICE == "NPU" else ALL_SUPPORTED_ARCHITECTURES
+    # filter architectures depending on min/max transformers supported versions
+    SUPPORTED_ARCHITECTURES = tuple(
+        arch
+        for arch in SUPPORTED_ARCHITECTURES
+        if TEST_NAME_TO_MODEL_TYPE.get(arch, arch) in get_supported_model_for_library("transformers")
+    )
 
     REMOTE_CODE_MODELS = _test_seq2seq.OVModelForVisualCausalLMIntegrationTest.REMOTE_CODE_MODELS
 
@@ -368,7 +386,7 @@ class VLMPipelineTestCase(unittest.TestCase):
     IMAGE = Image.open(requests.get(TEST_IMAGE_URL, stream=True).raw).convert("RGB")
 
     def _get_model_class(self, model_arch):
-        if is_transformers_version(">=", "4.46") and model_arch in {
+        if model_arch in {
             "llava",
             "llava_next",
             "llava_next_mistral",
@@ -690,7 +708,7 @@ class LLMPipelineWithEagle3TestCase(unittest.TestCase):
     @parameterized.expand(EAGLE3_VLM_MODELS.items())
     def test_compare_outputs_vlm(self, model_arch, model_pair):
         logger.info("Testing Eagle3 VLM %s on device=%s", model_arch, OPENVINO_DEVICE)
-        if is_transformers_version("<", "4.57") or is_transformers_version(">=", "5.0.0"):
+        if is_transformers_version(">=", "5.0.0"):
             self.skipTest("Eagle3 VLM requires transformers >= 4.57 and < 5.0.0")
 
         draft_model_id, target_model_id = model_pair
