@@ -264,7 +264,7 @@ class LLMPipelineTestCase(unittest.TestCase):
         "num_beams": 1,
     }
 
-    @parameterized.expand(SUPPORTED_ARCHITECTURES)
+    @parameterized.expand(SUPPORTED_ARCHITECTURES, skip_on_empty=True)
     def test_compare_outputs(self, model_arch):
         logger.info("Testing %s on device=%s", model_arch, OPENVINO_DEVICE)
         if model_arch in (
@@ -423,7 +423,7 @@ class VLMPipelineTestCase(unittest.TestCase):
         else:
             return AutoModelForCausalLM
 
-    @parameterized.expand(SUPPORTED_ARCHITECTURES)
+    @parameterized.expand(SUPPORTED_ARCHITECTURES, skip_on_empty=True)
     def test_compare_outputs(self, model_arch):
         logger.info("Testing %s on device=%s", model_arch, OPENVINO_DEVICE)
         model_id = MODEL_NAMES[model_arch]
@@ -519,7 +519,7 @@ class Speech2TextPipelineTestCase(unittest.TestCase):
         audio = 0.5 * np.sin(2 * np.pi * 220 * t)
         return audio
 
-    @parameterized.expand(SUPPORTED_ARCHITECTURES)
+    @parameterized.expand(SUPPORTED_ARCHITECTURES, skip_on_empty=True)
     def test_compare_outputs(self, model_arch):
         logger.info("Testing %s on device=%s", model_arch, OPENVINO_DEVICE)
         model_id = MODEL_NAMES[model_arch]
@@ -591,7 +591,7 @@ class Text2SpeechPipelineTestCase(unittest.TestCase):
         speaker_embedding = np.random.randn(1, 512).astype(np.float32)
         return torch.tensor(speaker_embedding)
 
-    @parameterized.expand(SUPPORTED_ARCHITECTURES)
+    @parameterized.expand(SUPPORTED_ARCHITECTURES, skip_on_empty=True)
     def test_compare_outputs(self, model_arch):
         logger.info("Testing %s on device=%s", model_arch, OPENVINO_DEVICE)
         if model_arch in ("speecht5",) and is_openvino_version(">=", "2026.1.0"):
@@ -650,7 +650,7 @@ class LLMPipelineWithEagle3TestCase(unittest.TestCase):
         "num_beams": 1,
     }
 
-    @parameterized.expand(EAGLE3_MODELS.items())
+    @parameterized.expand(EAGLE3_MODELS.items(), skip_on_empty=True)
     def test_compare_outputs(self, model_arch, model_pair):
         logger.debug("Testing Eagle3 %s on device=%s", model_arch, OPENVINO_DEVICE)
         if is_transformers_version("<", "4.54"):
@@ -705,7 +705,7 @@ class LLMPipelineWithEagle3TestCase(unittest.TestCase):
         # compare outputs
         self.assertEqual(genai_eagle3_output, genai_output)
 
-    @parameterized.expand(EAGLE3_VLM_MODELS.items())
+    @parameterized.expand(EAGLE3_VLM_MODELS.items(), skip_on_empty=True)
     def test_compare_outputs_vlm(self, model_arch, model_pair):
         logger.info("Testing Eagle3 VLM %s on device=%s", model_arch, OPENVINO_DEVICE)
         if is_transformers_version(">=", "5.0.0"):
