@@ -351,6 +351,7 @@ _GENAI_VLM_UNSUPPORTED_ARCHITECTURES = (
     "minicpmv",  # transformers output is empty with tiny model on transformers 4.57
     "smolvlm",
     "videochat_flash_qwen",  # GenAI requires video input; image-only not supported
+    "qwen3_omni_moe", # not supported bij OpenVINO GenAI 2026.3.0
 )
 
 
