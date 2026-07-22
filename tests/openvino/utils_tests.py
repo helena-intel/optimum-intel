@@ -305,6 +305,7 @@ HUB_MODEL_NAMES = {
     "qwen3_5": "optimum-intel-internal-testing/tiny-random-qwen3.5",
     "qwen3_5_moe": "optimum-intel-internal-testing/tiny-random-qwen3.5-moe",
     "qwen3_asr": "optimum-intel-internal-testing/tiny-random-qwen3-asr",
+    "fun_asr": "optimum-intel-internal-testing/tiny-random-fun-asr",
     "rembert": "optimum-intel-internal-testing/tiny-random-rembert",
     "resnet": "optimum-intel-internal-testing/tiny-random-resnet",
     "roberta": "optimum-intel-internal-testing/tiny-random-roberta",
@@ -372,11 +373,24 @@ def _resolve_cached_model_paths(model_names: dict) -> dict:
         if not os.path.exists(constants.HF_HUB_CACHE):
             return model_names
 
-        repo_id_to_local_paths = {
-            repo.repo_id: str(next(iter(repo.revisions)).snapshot_path)
-            for repo in scan_cache_dir().repos
-            if repo.revisions
-        }
+        repo_id_to_local_paths = {}
+        for repo in scan_cache_dir().repos:
+            if not repo.revisions:
+                continue
+            best = None
+            for rev in sorted(repo.revisions, key=lambda r: r.last_modified, reverse=True):
+                file_names = {f.file_name for f in rev.files}
+                if "config.json" not in file_names:
+                    continue
+                # Skip repos with custom Python code — their Hub repos can add new .py
+                # files that a stale local snapshot won't have, causing FileNotFoundError
+                if any(f.endswith(".py") for f in file_names):
+                    break
+                if all(os.path.exists(f.file_path) for f in rev.files):
+                    best = rev
+                    break
+            if best is not None:
+                repo_id_to_local_paths[repo.repo_id] = str(best.snapshot_path)
         return {k: repo_id_to_local_paths.get(v, v) for k, v in model_names.items()}
     except Exception:
         return model_names
@@ -613,6 +627,11 @@ _ARCHITECTURES_TO_EXPECTED_INT8 = {
         "decoder": 30,
         "decoder_with_past": 30,
     },
+    "fun_asr": {
+        "encoder": 46,
+        "decoder": 30,
+        "decoder_with_past": 30,
+    },
 }
 
 TEST_IMAGE_URL = "http://images.cocodataset.org/val2017/000000039769.jpg"
@@ -641,6 +660,7 @@ REMOTE_CODE_MODELS = (
     "qwen3_eagle3",
     "qwen3_vl_eagle3",
     "qwen3_asr",
+    "fun_asr",
     "videochat_flash_qwen",
 )
 

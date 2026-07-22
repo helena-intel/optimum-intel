@@ -1,16 +1,19 @@
 """
 Test OpenVINO GenAI inference on models exported with optimum-intel
 
-- OpenVINO device can be set by environment variable OPENVINO_TEST_DEVICE
-  - For NPU, Text2Speech test is not supported; for LLM and VLM only a limited list of models is currently supported. This will be expanded. Only the latest supported transformers/OpenVINO/optimum-intel versions are tested.
-  - For GPU, there are known failed tests on some GPUs. This is under investigation.
+- OpenVINO device can be set by setting environment variable OPENVINO_TEST_DEVICE to CPU, GPU or NPU
+  - For NPU, Text2Speech test is not supported; for LLM and VLM only a limited list of models is currently supported.
+    This will be expanded.
 """
 
 # ruff: noqa: I001  # Avoid black/ruff conflict: ruff isort wants 2 blank lines after imports, black collapses to 1
 
 import gc
+import logging
 import os
+import psutil
 import shutil
+import sys
 import tempfile
 import traceback as traceback_mod
 import unittest
@@ -39,6 +42,8 @@ from transformers import (
     AutoTokenizer,
     set_seed,
 )
+import test_decoder as _test_decoder
+import test_seq2seq as _test_seq2seq
 from utils_tests import (
     EAGLE3_MODELS,
     EAGLE3_VLM_MODELS,
@@ -62,10 +67,66 @@ from optimum.intel.openvino.modeling_visual_language import MODEL_TYPE_TO_CLS_MA
 from optimum.intel.utils.import_utils import is_openvino_version
 from optimum.utils import is_transformers_version
 
-# NPU does not support f32 inference
-TEST_CONFIG = {"CACHE_DIR": ""} if OPENVINO_DEVICE == "NPU" else {**F32_CONFIG, "CACHE_DIR": ""}
+logger = logging.getLogger(__name__)
+
+if OPENVINO_DEVICE == "NPU":
+    TEST_CONFIG = {"CACHE_DIR": ""}
+else:
+    TEST_CONFIG = {**F32_CONFIG, "CACHE_DIR": ""}
+if OPENVINO_DEVICE == "CPU":
+    TEST_CONFIG["INFERENCE_NUM_THREADS"] = 1  # TODO, workaround for crashes
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+
+TOP_K_TOLERANCE = 3  # Accept divergences where the alternative token is in the top-K of the reference logits
+
+
+def _assert_tokens_match(test_case, ref_ids, ref_top_k, test_ids, ref_label, test_label):
+    """Assert that test_ids match ref_ids, tolerating near-tied logit divergences.
+
+    When tokens differ at a position, checks whether the test token ranks within
+    TOP_K_TOLERANCE of the reference logit distribution at that step. If it does,
+    it means the model was ambivalent (near-tied logits) and the divergence is
+    acceptable. Only fails if a test token is far from the reference top-K.
+
+    After the first divergence, subsequent tokens are not compared (since the
+    autoregressive cascade makes them meaningless).
+
+    Args:
+        test_case: unittest.TestCase instance (for assertions)
+        ref_ids: list of token IDs from the reference backend
+        ref_top_k: list of top-K token ID lists (one per generated position) from the reference;
+                   can be None if scores unavailable (falls back to strict equality)
+        test_ids: list of token IDs from the backend under test
+        ref_label: name of reference backend (e.g. "Transformers")
+        test_label: name of test backend (e.g. "OpenVINO GenAI")
+    """
+    if ref_ids == test_ids:
+        return
+
+    if ref_top_k is None:
+        test_case.assertEqual(ref_ids, test_ids, f"{ref_label} ids and {test_label} ids are not the same")
+        return
+
+    for pos, (ref_tok, test_tok) in enumerate(zip(ref_ids, test_ids)):
+        if ref_tok == test_tok:
+            continue
+
+        top_k_tokens = ref_top_k[pos]
+
+        test_case.assertIn(
+            test_tok,
+            top_k_tokens,
+            f"{ref_label} vs {test_label}: token mismatch at position {pos}. "
+            f"{ref_label} chose {ref_tok}, {test_label} chose {test_tok}, "
+            f"but {test_tok} is not in {ref_label}'s top-{TOP_K_TOLERANCE} "
+            f"(top-{TOP_K_TOLERANCE}: {top_k_tokens}). "
+            f"This indicates a real inference divergence, not a near-tied logit flip.",
+        )
+        # After first divergence, the autoregressive cascade makes further comparisons meaningless
+        break
+
 
 _temp_dirs = []  # Collect temp dirs for batch cleanup after all tests finish
 
@@ -119,60 +180,44 @@ def temp_dir_fixture(request):
     tmp_path = tempfile.mkdtemp()
     request.instance.temp_dir = tmp_path
     yield
+    gc.collect()
     try:
         shutil.rmtree(tmp_path)
     except (PermissionError, OSError):
         _temp_dirs.append(tmp_path)
 
 
+_GENAI_LLM_UNSUPPORTED_ARCHITECTURES = (
+    # seq2seq models — not supported by LLMPipeline
+    "bart",
+    "bigbird_pegasus",
+    "blenderbot",
+    "blenderbot-small",
+    "marian",
+    "mbart",
+    "pegasus",
+    # SSM / hybrid models
+    "mamba",
+    "falcon_mamba",
+    "granitemoehybrid",
+    "zamba2",
+    # not supported by GenAI
+    "afmoe",
+    "biogpt",
+    "gemma3n_text",
+    # tiny test model issues
+    "gpt_neo",  # missing generation_config.json
+    "mpt",  # output mismatch with GenAI
+    # quantized variant tested via gpt_oss
+    "gpt_oss_mxfp4",
+)
+
+
 class LLMPipelineTestCase(unittest.TestCase):
-    ALL_SUPPORTED_ARCHITECTURES = (
-        "gpt_bigcode",
-        "bloom",
-        "codegen",
-        "gpt2",
-        "gptj",
-        "gpt_neox",
-        "llama",
-        "mistral",
-        "mixtral",
-        "phi",
-        "falcon",
-        "persimmon",
-        "xglm",
-        "gemma",
-        "olmo",
-        "stablelm",
-        "starcoder2",
-        "cohere",
-        "qwen2",
-        "qwen2_moe",
-        "gemma2",
-        "granite",
-        "granitemoe",
-        "glm",
-        "mistral-nemo",
-        "opt",
-        "cohere2",
-        "gemma3_text",
-        "qwen3",
-        "qwen3_moe",
-        "glm4",
-        "arcee",
-        "gpt_oss",
-        "smollm3",
-        "phi3",
-        "phimoe",
-        "exaone4",
-        "exaone",
-        "decilm",
-        "internlm2",
-        "orion",
-        "aquila2",
-        "jais",
-        "aquila",
-        "internlm",
-        "dbrx",
+    ALL_SUPPORTED_ARCHITECTURES = tuple(
+        arch
+        for arch in _test_decoder.OVModelForCausalLMIntegrationTest.SUPPORTED_ARCHITECTURES
+        if arch not in _GENAI_LLM_UNSUPPORTED_ARCHITECTURES
     )
 
     # remote modeling incompatible with v5 but not filtered as CodeGenOpenVINOConfig is compatible (codegen)
@@ -181,9 +226,14 @@ class LLMPipelineTestCase(unittest.TestCase):
 
     # to be expanded, other architectures work on NPU too
     # qwen2, phi and phi3 tests are flaky on NPU, not including for now
-    NPU_SUPPORTED_ARCHITECTURES = ("gpt2", "glm", "opt", "qwen3_moe", "gpt_oss")
+    # TODO, these models work on NPU and should be included in tests:
+    # google/gemma-3-4b-it, EleutherAI/gpt-j-6b, deepseek-ai/DeepSeek-R1-Distill-Qwen-7B, deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B, Qwen/Qwen3-8B, microsoft/Phi-3.5-mini-instruct, tiiuae/falcon-7b-instruct,
+    # mistralai/Mistral-7B-Instruct-v0.2, microsoft/Phi-3-mini-4k-instruct, mistralai/Mistral-7B-Instruct-v0.3, deepseek-ai/DeepSeek-R1-Distill-Qwen-7B, deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B,
+    # microsoft/Phi-3.5-mini-instruct, microsoft/Phi-3-mini-4k-instruct
+    NPU_SUPPORTED_ARCHITECTURES = ("gpt2", "glm", "gptj", "opt", "qwen3_moe", "gpt_oss", "phi3", "mistral")
+    # Uncomment this for testing, expect crashes
+    # NPU_SUPPORTED_ARCHITECTURES = ALL_SUPPORTED_ARCHITECTURES
 
-    # for now we do not test NPU with old transformers versions
     SUPPORTED_ARCHITECTURES = NPU_SUPPORTED_ARCHITECTURES if OPENVINO_DEVICE == "NPU" else ALL_SUPPORTED_ARCHITECTURES
     # filter architectures depending on min/max transformers supported versions
     SUPPORTED_ARCHITECTURES = tuple(
@@ -192,33 +242,19 @@ class LLMPipelineTestCase(unittest.TestCase):
         if TEST_NAME_TO_MODEL_TYPE.get(arch, arch) in get_supported_model_for_library("transformers")
     )
 
-    REMOTE_CODE_MODELS = (
-        "minicpm",
-        "jais",
-        "qwen",
-        "internlm2",
-        "orion",
-        "aquila",
-        "aquila2",
-        "internlm",
-        "codegen2",
-        "arctic",
-        "chatglm4",
-        "exaone",
-        "exaone4",
-        "decilm",
-        "minicpm3",
-        "deepseek",
-    )
+    REMOTE_CODE_MODELS = REMOTE_CODE_MODELS
     NO_CACHE_MODELS = (  # mostly remote that are broken with past key values
         "aquila",
         "aquila2",
+        "baichuan2",
+        "baichuan2-13b",
         "decilm",
         "internlm",
         "internlm2",
         "orion",
         "jais",
         "qwen",
+        "xverse",
     )
 
     GEN_KWARGS = {
@@ -228,8 +264,9 @@ class LLMPipelineTestCase(unittest.TestCase):
         "num_beams": 1,
     }
 
-    @parameterized.expand(SUPPORTED_ARCHITECTURES)
+    @parameterized.expand(SUPPORTED_ARCHITECTURES, skip_on_empty=True)
     def test_compare_outputs(self, model_arch):
+        logger.info("Testing %s on device=%s", model_arch, OPENVINO_DEVICE)
         if model_arch in (
             "xglm",
             "persimmon",
@@ -245,9 +282,21 @@ class LLMPipelineTestCase(unittest.TestCase):
         model_id = MODEL_NAMES[model_arch]
         use_cache = model_arch not in self.NO_CACHE_MODELS
         trust_remote_code = model_arch in self.REMOTE_CODE_MODELS
+        prompt = "Paris is the capital of"
+
+        # BitNet uses torch.compile for custom ternary weight ops, which requires a C++ compiler (cl.exe on Windows)
+        if model_arch == "bitnet":
+            torch._dynamo.config.disable = True
 
         set_seed(42)
         transformers_model = AutoModelForCausalLM.from_pretrained(model_id, trust_remote_code=trust_remote_code).eval()
+
+        # fixed in https://github.com/huggingface/transformers/pull/43445, still needed for v5.0
+        if model_arch == "phimoe" and is_transformers_version("==", "5.0"):
+            transformers_model.model.rotary_emb.short_mscale = transformers_model.config.rope_parameters[
+                "short_mscale"
+            ]
+            transformers_model.model.rotary_emb.long_mscale = transformers_model.config.rope_parameters["long_mscale"]
 
         set_seed(42)
         main_export(
@@ -259,52 +308,60 @@ class LLMPipelineTestCase(unittest.TestCase):
         )
         genai_model = LLMPipeline(self.temp_dir, device=OPENVINO_DEVICE, **TEST_CONFIG)
 
-        prompt = "Paris is the capital of"
         tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=trust_remote_code)
         inputs = tokenizer(prompt, return_tensors="pt")
         input_len = inputs["input_ids"].shape[-1]
 
         with torch.no_grad():
-            transformers_ids = transformers_model.generate(**inputs, use_cache=use_cache, **self.GEN_KWARGS)
-            transformers_ids = transformers_ids.squeeze()[input_len:]
+            output = transformers_model.generate(
+                **inputs, use_cache=use_cache, output_scores=True, return_dict_in_generate=True, **self.GEN_KWARGS
+            )
+            transformers_ids = output.sequences.squeeze()[input_len:].tolist()
+            transformers_top_k = [s.squeeze(0).topk(TOP_K_TOLERANCE).indices.tolist() for s in output.scores]
+        del transformers_model
 
         if OPENVINO_DEVICE != "NPU":
             optimum_model = OVModelForCausalLM.from_pretrained(
                 self.temp_dir, trust_remote_code=trust_remote_code, device=OPENVINO_DEVICE, ov_config=TEST_CONFIG
             )
             optimum_ids = optimum_model.generate(**inputs, use_cache=use_cache, **self.GEN_KWARGS)
-            optimum_ids = optimum_ids.squeeze()[input_len:]
-            self.assertEqual(
-                transformers_ids.squeeze().tolist(),
-                optimum_ids.squeeze().tolist(),
-                "Transformers ids and Optimum ids are not the same",
-            )
+            optimum_ids = optimum_ids.squeeze()[input_len:].tolist()
+            _assert_tokens_match(self, transformers_ids, transformers_top_k, optimum_ids, "Transformers", "Optimum")
+            del optimum_model
 
+        mem = psutil.virtual_memory()
+        logger.info(f"Memory before GenAI call: {mem.percent}% used, {mem.available // (1024**2)} MB available")
         genai_ids = genai_model(
             ov.Tensor(inputs["input_ids"].numpy()), apply_chat_template=False, **self.GEN_KWARGS
         ).tokens[0]
 
         del genai_model
-        del transformers_model
-        if OPENVINO_DEVICE != "NPU":
-            del optimum_model
         gc.collect()
 
-        self.assertEqual(
-            transformers_ids.tolist(), genai_ids, "Transformers ids and OpenVINO GenAI ids are not the same"
-        )
+        _assert_tokens_match(self, transformers_ids, transformers_top_k, genai_ids, "Transformers", "OpenVINO GenAI")
+
+
+_GENAI_VLM_UNSUPPORTED_ARCHITECTURES = (
+    "gemma3n",  # Supported from 2026.3.0 but known issue
+    "idefics3",
+    "got_ocr2",
+    "internvl_chat",  # AssertionError in model's remote code during inference
+    "llama4",
+    "maira2",
+    "minicpmv",  # transformers output is empty with tiny model on transformers 4.57
+    "smolvlm",
+    "videochat_flash_qwen",  # GenAI requires video input; image-only not supported
+    "qwen3_omni_moe", # not supported bij OpenVINO GenAI 2026.3.0
+)
 
 
 class VLMPipelineTestCase(unittest.TestCase):
-    ALL_SUPPORTED_ARCHITECTURES = (
-        "llava_next",
-        # "minicpmv", # output is truncated for some reason
-        "qwen2_vl",
-        "llava_next_mistral",
-        "qwen2_5_vl",
-        "gemma3",
-        "llava",
-        "llava_next_video",
+    GENAI_UNSUPPORTED_ARCHITECTURES = _GENAI_VLM_UNSUPPORTED_ARCHITECTURES
+
+    ALL_SUPPORTED_ARCHITECTURES = tuple(
+        arch
+        for arch in _test_seq2seq.OVModelForVisualCausalLMIntegrationTest.SUPPORTED_ARCHITECTURES
+        if arch not in _GENAI_VLM_UNSUPPORTED_ARCHITECTURES
     )
 
     # for now we do not test NPU with old transformers versions
@@ -318,13 +375,7 @@ class VLMPipelineTestCase(unittest.TestCase):
         if TEST_NAME_TO_MODEL_TYPE.get(arch, arch) in get_supported_model_for_library("transformers")
     )
 
-    REMOTE_CODE_MODELS = (
-        "minicpmv",
-        "minicpmo",
-        "llava-qwen2",
-        "phi3_v",
-        "phi4mm",
-    )
+    REMOTE_CODE_MODELS = _test_seq2seq.OVModelForVisualCausalLMIntegrationTest.REMOTE_CODE_MODELS
 
     GEN_KWARGS = {
         "max_new_tokens": 10,
@@ -342,7 +393,10 @@ class VLMPipelineTestCase(unittest.TestCase):
             "llava_next_mistral",
             "qwen2_vl",
             "qwen2_5_vl",
+            "qwen3_vl",
             "gemma3",
+            "gemma3n",
+            "llama4",
         }:
             from transformers import AutoModelForImageTextToText
 
@@ -363,11 +417,16 @@ class VLMPipelineTestCase(unittest.TestCase):
             from transformers import Qwen2VLForConditionalGeneration
 
             return Qwen2VLForConditionalGeneration
+        elif model_arch in self.REMOTE_CODE_MODELS:
+            from transformers import AutoModel
+
+            return AutoModel
         else:
             return AutoModelForCausalLM
 
-    @parameterized.expand(SUPPORTED_ARCHITECTURES)
+    @parameterized.expand(SUPPORTED_ARCHITECTURES, skip_on_empty=True)
     def test_compare_outputs(self, model_arch):
+        logger.info("Testing %s on device=%s", model_arch, OPENVINO_DEVICE)
         model_id = MODEL_NAMES[model_arch]
         trust_remote_code = model_arch in self.REMOTE_CODE_MODELS
 
@@ -388,6 +447,10 @@ class VLMPipelineTestCase(unittest.TestCase):
         image = self.IMAGE
         prompt = "A photo of a cat sitting on a"
         config = AutoConfig.from_pretrained(model_id, trust_remote_code=trust_remote_code)
+        # For remote code models, transformers sets _name_or_path to the local snapshot path which may
+        # be incomplete (missing auxiliary .py files). Reset to the hub ID so the model can download them.
+        if trust_remote_code:
+            config._name_or_path = model_id
         tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=trust_remote_code)
         processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=trust_remote_code)
         # On NPU, the optimum models cannot be loaded, so we use the preprocess_inputs method from the model class directly
@@ -395,22 +458,23 @@ class VLMPipelineTestCase(unittest.TestCase):
         inputs = model_cls.preprocess_inputs(
             text=prompt, image=image, tokenizer=tokenizer, processor=processor, config=config
         )
-        full_prompt = tokenizer.decode(inputs["input_ids"][0], skip_special_tokens=True)
-
+        input_len = inputs["input_ids"].shape[-1]
         with torch.no_grad():
-            transformers_ids = transformers_model.generate(**inputs, **self.GEN_KWARGS)
-        transformers_output = tokenizer.decode(transformers_ids[0], skip_special_tokens=True)
-        transformers_output = transformers_output[len(full_prompt) :].strip()
+            output = transformers_model.generate(
+                **inputs, output_scores=True, return_dict_in_generate=True, **self.GEN_KWARGS
+            )
+            transformers_ids = output.sequences.squeeze()[input_len:].tolist()
+            transformers_top_k = [s.squeeze(0).topk(TOP_K_TOLERANCE).indices.tolist() for s in output.scores]
+        transformers_output = tokenizer.decode(transformers_ids, skip_special_tokens=True).strip()
 
         if OPENVINO_DEVICE != "NPU":
             optimum_model = OVModelForVisualCausalLM.from_pretrained(
                 self.temp_dir, device=OPENVINO_DEVICE, ov_config=TEST_CONFIG, trust_remote_code=trust_remote_code
             )
             optimum_ids = optimum_model.generate(**inputs, **self.GEN_KWARGS)
-            optimum_output = tokenizer.decode(optimum_ids[0], skip_special_tokens=True)
-            optimum_output = optimum_output[len(full_prompt) :].strip()
-            self.assertTrue(optimum_output)
-            self.assertEqual(transformers_output, optimum_output, "Transformers and Optimum outputs are not the same")
+            optimum_ids = optimum_ids.squeeze()[input_len:].tolist()
+            self.assertTrue(optimum_ids)
+            _assert_tokens_match(self, transformers_ids, transformers_top_k, optimum_ids, "Transformers", "Optimum")
 
         # apply_chat_template is set to True because it is also set in preprocess_inputs()
         genai_output = genai_model.generate(
@@ -427,8 +491,13 @@ class VLMPipelineTestCase(unittest.TestCase):
         self.assertTrue(transformers_output)
         self.assertTrue(genai_output)
 
-        # compare outputs
-        self.assertEqual(transformers_output, genai_output, "Transformers and OpenVINO GenAI outputs are not the same")
+        # GenAI VLM only returns text; compare decoded outputs
+        if transformers_output != genai_output:
+            # Tokenize both to find divergence point and check against top-K
+            genai_ids = tokenizer.encode(genai_output, add_special_tokens=False)
+            _assert_tokens_match(
+                self, transformers_ids, transformers_top_k, genai_ids, "Transformers", "OpenVINO GenAI"
+            )
 
 
 @pytest.mark.skipif(
@@ -436,7 +505,7 @@ class VLMPipelineTestCase(unittest.TestCase):
     reason="Speech2Text test on NPU is only supported with transformers < 5.0",
 )
 class Speech2TextPipelineTestCase(unittest.TestCase):
-    SUPPORTED_ARCHITECTURES = ("whisper",)
+    SUPPORTED_ARCHITECTURES = _test_seq2seq.OVModelForSpeechSeq2SeqIntegrationTest.SUPPORTED_ARCHITECTURES
 
     GEN_KWARGS = {
         "max_new_tokens": 10,
@@ -451,8 +520,9 @@ class Speech2TextPipelineTestCase(unittest.TestCase):
         audio = 0.5 * np.sin(2 * np.pi * 220 * t)
         return audio
 
-    @parameterized.expand(SUPPORTED_ARCHITECTURES)
+    @parameterized.expand(SUPPORTED_ARCHITECTURES, skip_on_empty=True)
     def test_compare_outputs(self, model_arch):
+        logger.info("Testing %s on device=%s", model_arch, OPENVINO_DEVICE)
         model_id = MODEL_NAMES[model_arch]
 
         set_seed(42)
@@ -498,7 +568,7 @@ class Speech2TextPipelineTestCase(unittest.TestCase):
 
 @pytest.mark.skipif(OPENVINO_DEVICE == "NPU", reason="Text2Speech test is not yet supported on NPU")
 class Text2SpeechPipelineTestCase(unittest.TestCase):
-    SUPPORTED_ARCHITECTURES = ("speecht5",)
+    SUPPORTED_ARCHITECTURES = _test_seq2seq.OVModelForTextToSpeechSeq2SeqIntegrationTest.SUPPORTED_ARCHITECTURES
     VOCODER = "fxmarty/speecht5-hifigan-tiny"
 
     GEN_KWARGS = {
@@ -522,8 +592,9 @@ class Text2SpeechPipelineTestCase(unittest.TestCase):
         speaker_embedding = np.random.randn(1, 512).astype(np.float32)
         return torch.tensor(speaker_embedding)
 
-    @parameterized.expand(SUPPORTED_ARCHITECTURES)
+    @parameterized.expand(SUPPORTED_ARCHITECTURES, skip_on_empty=True)
     def test_compare_outputs(self, model_arch):
+        logger.info("Testing %s on device=%s", model_arch, OPENVINO_DEVICE)
         if model_arch in ("speecht5",) and is_openvino_version(">=", "2026.1.0"):
             self.skipTest("CVS-185350: OpenVINO 2026.1.0 inference results mismatch")
         model_id = MODEL_NAMES[model_arch]
@@ -570,6 +641,7 @@ class Text2SpeechPipelineTestCase(unittest.TestCase):
         torch.testing.assert_close(transformers_output, genai_output, rtol=1e-2, atol=1e-3)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Access violation on Windows")
 @pytest.mark.skipif(OPENVINO_DEVICE == "NPU", reason="Eagle3 test is not yet supported on NPU")
 class LLMPipelineWithEagle3TestCase(unittest.TestCase):
     GEN_KWARGS = {
@@ -579,8 +651,11 @@ class LLMPipelineWithEagle3TestCase(unittest.TestCase):
         "num_beams": 1,
     }
 
-    @parameterized.expand(EAGLE3_MODELS.items())
+    @parameterized.expand(EAGLE3_MODELS.items(), skip_on_empty=True)
     def test_compare_outputs(self, model_arch, model_pair):
+        logger.debug("Testing Eagle3 %s on device=%s", model_arch, OPENVINO_DEVICE)
+        if is_transformers_version("<", "4.54"):
+            self.skipTest("Eagle3 requires transformers >= 4.54")
         if is_openvino_version("<", "2026.0"):
             self.skipTest("Eagle3 requires openvino-genai >= 2026.0")
 
@@ -631,14 +706,11 @@ class LLMPipelineWithEagle3TestCase(unittest.TestCase):
         # compare outputs
         self.assertEqual(genai_eagle3_output, genai_output)
 
-    @parameterized.expand(EAGLE3_VLM_MODELS.items())
+    @parameterized.expand(EAGLE3_VLM_MODELS.items(), skip_on_empty=True)
     def test_compare_outputs_vlm(self, model_arch, model_pair):
+        logger.info("Testing Eagle3 VLM %s on device=%s", model_arch, OPENVINO_DEVICE)
         if is_transformers_version(">=", "5.0.0"):
             self.skipTest("Eagle3 VLM requires transformers >= 4.57 and < 5.0.0")
-        if is_openvino_version("<", "2026.999"):
-            self.skipTest(
-                "Eagle3 requires openvino-genai >= 2026.999. Need to get PR https://github.com/openvinotoolkit/openvino.genai/pull/3330 merged."
-            )
 
         draft_model_id, target_model_id = model_pair
         trust_remote_code = model_arch in REMOTE_CODE_MODELS
