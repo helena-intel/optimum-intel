@@ -96,7 +96,7 @@ jobs:
           python-version: "3.10"
 
       - name: Install dependencies
-        run: pip install requests
+        run: pip install requests openpyxl
 
       - name: Generate report
         env:
@@ -105,12 +105,14 @@ jobs:
           python .github/workflows/generate_genai_report.py \
             --run-id ${{ github.run_id }} \
             --html \
+            --xlsx \
             --output report.md
 
       - name: Upload report artifact
         uses: actions/upload-artifact@v4
         with:
-          name: test-report
+          name: optimum-genai-test-report
           path: |
-            report.md
-            report.html
+            optimum-genai-test-report.md
+            optimum-genai-test-report.html
+            optimum-genai-test-report.xlsx

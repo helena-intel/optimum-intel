@@ -6,6 +6,7 @@ and produces a markdown table with models in rows, MTL/LNL columns with CPU/GPU/
 
 Requirements:
     pip install requests
+    pip install openpyxl  # only needed for --xlsx
 
 Usage:
     # Set GITHUB_TOKEN environment variable (needs repo/actions read access)
@@ -17,10 +18,13 @@ Usage:
     python generate_genai_report.py --run-id 29916107736
 
     # Save to file (markdown):
-    python generate_genai_report.py --output report.md
+    python generate_genai_report.py --output optimum-genai-test-report.md
 
     # Generate HTML report:
-    python generate_genai_report.py --html --output report.html
+    python generate_genai_report.py --html --output optimum-genai-test-report.html
+
+    # Generate Excel report (single sheet, transformers version as column):
+    python generate_genai_report.py --xlsx --output optimum-genai-test-report.xlsx
 """
 
 import argparse
@@ -404,6 +408,107 @@ def build_report(run_info, jobs, job_logs):
     return "\n".join(lines)
 
 
+def build_xlsx_report(run_info, jobs, job_logs, output_path):
+    """Build an Excel report with a single sheet combining all transformers versions.
+
+    Columns: Transformers Version | Category | Model | MTL/CPU | MTL/GPU | MTL/NPU | LNL/CPU | LNL/GPU | LNL/NPU
+    """
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Alignment, Font, PatternFill
+    except ImportError:
+        print("ERROR: openpyxl is required for --xlsx. Install with: pip install openpyxl", file=sys.stderr)
+        sys.exit(1)
+
+    # Parse results (same logic as build_report)
+    results = defaultdict(lambda: defaultdict(dict))
+
+    for job in jobs:
+        job_name = job["name"]
+        version, device, runner = parse_job_name(job_name)
+        if not version:
+            continue
+
+        log_content = job_logs.get(job["id"])
+        if log_content:
+            test_results = parse_test_results_from_log(log_content)
+            for (class_name, test_method), status in test_results.items():
+                category = extract_test_category(class_name)
+                model_name = extract_model_from_test_name(test_method)
+                if model_name is None:
+                    continue
+                model_key = (category, model_name)
+                results[version][model_key][(runner, device)] = status
+
+    runners = ["MTL", "LNL"]
+    devices = ["CPU", "GPU", "NPU"]
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "GenAI Test Results"
+
+    # Header row
+    headers = ["Transformers Version", "Category", "Model"]
+    for runner in runners:
+        for device in devices:
+            headers.append(f"{runner}/{device}")
+    ws.append(headers)
+
+    # Style header
+    header_font = Font(bold=True)
+    header_fill = PatternFill(start_color="F6F8FA", end_color="F6F8FA", fill_type="solid")
+    for col_idx, cell in enumerate(ws[1], 1):
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center")
+
+    # Status fill colors
+    status_fills = {
+        "passed": PatternFill(start_color="DCFCE7", end_color="DCFCE7", fill_type="solid"),
+        "failed": PatternFill(start_color="FEE2E2", end_color="FEE2E2", fill_type="solid"),
+        "skipped": PatternFill(start_color="FEF9C3", end_color="FEF9C3", fill_type="solid"),
+        "error": PatternFill(start_color="FFEDD5", end_color="FFEDD5", fill_type="solid"),
+    }
+
+    # Data rows - sorted by version, then category, then model
+    for version in sorted(results.keys()):
+        model_keys = sorted(results[version].keys(), key=lambda x: (x[0], x[1]))
+        for category, model_name in model_keys:
+            row = [version, category, model_name]
+            for runner in runners:
+                for device in devices:
+                    status = results[version][(category, model_name)].get((runner, device), "")
+                    row.append(status)
+            ws.append(row)
+
+    # Apply status fills and center alignment to data cells
+    for row_idx in range(2, ws.max_row + 1):
+        # Left-align text columns
+        for col_idx in range(1, 4):
+            ws.cell(row=row_idx, column=col_idx).alignment = Alignment(horizontal="left")
+        # Center and color status columns
+        for col_idx in range(4, 4 + len(runners) * len(devices)):
+            cell = ws.cell(row=row_idx, column=col_idx)
+            cell.alignment = Alignment(horizontal="center")
+            fill = status_fills.get(cell.value)
+            if fill:
+                cell.fill = fill
+
+    # Auto-fit column widths
+    for col in ws.columns:
+        max_length = 0
+        col_letter = col[0].column_letter
+        for cell in col:
+            if cell.value:
+                max_length = max(max_length, len(str(cell.value)))
+        ws.column_dimensions[col_letter].width = min(max_length + 2, 30)
+
+    # Add metadata in a freeze pane note: freeze the header row
+    ws.freeze_panes = "A2"
+
+    wb.save(output_path)
+
+
 def markdown_to_html(md_text):
     """Convert markdown report to a self-contained HTML page.
 
@@ -513,6 +618,8 @@ def main():
     parser.add_argument("--run-id", type=int, help="Specific workflow run ID (default: latest completed)")
     parser.add_argument("--output", "-o", type=str, help="Output file path (default: stdout)")
     parser.add_argument("--html", action="store_true", help="Also generate an HTML version of the report")
+    parser.add_argument("--xlsx", action="store_true",
+                        help="Generate an Excel (.xlsx) report with a single sheet and transformers version as column")
     parser.add_argument("--no-logs", action="store_true",
                         help="Skip downloading logs (only show job-level conclusions)")
     args = parser.parse_args()
@@ -557,7 +664,6 @@ def main():
     if args.html:
         html_content = markdown_to_html(report)
         if args.output:
-            # Derive HTML filename from the markdown output path
             base, _ = os.path.splitext(args.output)
             html_path = base + ".html"
         else:
@@ -565,6 +671,15 @@ def main():
         with open(html_path, "w", encoding="utf-8") as f:
             f.write(html_content)
         print(f"HTML report saved to {html_path}", file=sys.stderr)
+
+    if args.xlsx:
+        if args.output:
+            base, _ = os.path.splitext(args.output)
+            xlsx_path = base + ".xlsx"
+        else:
+            xlsx_path = "report.xlsx"
+        build_xlsx_report(run_info, jobs, job_logs, xlsx_path)
+        print(f"Excel report saved to {xlsx_path}", file=sys.stderr)
 
 
 if __name__ == "__main__":
