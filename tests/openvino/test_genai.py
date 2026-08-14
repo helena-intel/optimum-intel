@@ -57,6 +57,7 @@ from utils_tests import (
 )
 
 from optimum.exporters.openvino import main_export
+from optimum.intel import OVConfig
 from optimum.intel.openvino import (
     OVModelForCausalLM,
     OVModelForSpeechSeq2Seq,
@@ -224,14 +225,21 @@ class LLMPipelineTestCase(unittest.TestCase):
     if is_transformers_version("<", "5"):
         ALL_SUPPORTED_ARCHITECTURES += ("codegen2",)
 
-    # to be expanded, other architectures work on NPU too
-    # qwen2, phi and phi3 tests are flaky on NPU, not including for now
-    # TODO, these models work on NPU and should be included in tests:
-    # google/gemma-3-4b-it, EleutherAI/gpt-j-6b, deepseek-ai/DeepSeek-R1-Distill-Qwen-7B, deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B, Qwen/Qwen3-8B, microsoft/Phi-3.5-mini-instruct, tiiuae/falcon-7b-instruct,
-    # mistralai/Mistral-7B-Instruct-v0.2, microsoft/Phi-3-mini-4k-instruct, mistralai/Mistral-7B-Instruct-v0.3, deepseek-ai/DeepSeek-R1-Distill-Qwen-7B, deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B,
-    # microsoft/Phi-3.5-mini-instruct, microsoft/Phi-3-mini-4k-instruct
-    NPU_SUPPORTED_ARCHITECTURES = ("gpt2", "glm", "gptj", "opt", "qwen3_moe", "gpt_oss", "phi3", "mistral")
-    # Uncomment this for testing, expect crashes
+    # To be expanded, other architectures work on NPU too
+    # Known issues: lfm2 and qwen3 tiny models crash, phi3 tiny model crashes with transformers 5.5 (no issue with 5.0)
+    NPU_SUPPORTED_ARCHITECTURES = (
+        "gpt2",
+        "glm",
+        "gptj",
+        "opt",
+        "qwen3_moe",
+        "gpt_oss",
+        "phi3",
+        "mistral",
+        "gemma2",
+        "qwen2",
+    )  # known issue: lfm2 and qwen3 currently crash
+    # Uncomment this for testing, expect crashes.
     # NPU_SUPPORTED_ARCHITECTURES = ALL_SUPPORTED_ARCHITECTURES
 
     SUPPORTED_ARCHITECTURES = NPU_SUPPORTED_ARCHITECTURES if OPENVINO_DEVICE == "NPU" else ALL_SUPPORTED_ARCHITECTURES
@@ -267,18 +275,6 @@ class LLMPipelineTestCase(unittest.TestCase):
     @parameterized.expand(SUPPORTED_ARCHITECTURES, skip_on_empty=True)
     def test_compare_outputs(self, model_arch):
         logger.info("Testing %s on device=%s", model_arch, OPENVINO_DEVICE)
-        if model_arch in (
-            "xglm",
-            "persimmon",
-        ) and is_openvino_version(">=", "2026.1.0"):
-            self.skipTest("CVS-185350: OpenVINO 2026.1.0 inference results mismatch")
-        if (
-            model_arch in ("mixtral", "qwen2_moe", "qwen3_moe", "gpt_oss")
-            and is_openvino_version(">=", "2026.1.0")
-            and is_transformers_version(">=", "5.0.0")
-        ):
-            self.skipTest("CVS-185350: OpenVINO 2026.1.0 inference results mismatch")
-
         model_id = MODEL_NAMES[model_arch]
         use_cache = model_arch not in self.NO_CACHE_MODELS
         trust_remote_code = model_arch in self.REMOTE_CODE_MODELS
@@ -299,12 +295,15 @@ class LLMPipelineTestCase(unittest.TestCase):
             transformers_model.model.rotary_emb.long_mscale = transformers_model.config.rope_parameters["long_mscale"]
 
         set_seed(42)
+        # For NPU, convert to fp16 explicitly
+        export_ov_config = OVConfig(dtype="fp16") if OPENVINO_DEVICE == "NPU" else None
         main_export(
             model_name_or_path=model_id,
             task="text-generation-with-past",
             trust_remote_code=trust_remote_code,
             convert_tokenizer=True,
             output=self.temp_dir,
+            ov_config=export_ov_config,
         )
         genai_model = LLMPipeline(self.temp_dir, device=OPENVINO_DEVICE, **TEST_CONFIG)
 
@@ -351,7 +350,7 @@ _GENAI_VLM_UNSUPPORTED_ARCHITECTURES = (
     "minicpmv",  # transformers output is empty with tiny model on transformers 4.57
     "smolvlm",
     "videochat_flash_qwen",  # GenAI requires video input; image-only not supported
-    "qwen3_omni_moe", # not supported bij OpenVINO GenAI 2026.3.0
+    "qwen3_omni_moe",  # not supported bij OpenVINO GenAI 2026.3.0
 )
 
 
@@ -365,7 +364,7 @@ class VLMPipelineTestCase(unittest.TestCase):
     )
 
     # for now we do not test NPU with old transformers versions
-    NPU_SUPPORTED_ARCHITECTURES = ("qwen2_vl", "qwen2_5_vl")
+    NPU_SUPPORTED_ARCHITECTURES = ("qwen2_vl", "qwen2_5_vl", "gemma3", "gemma4")
 
     SUPPORTED_ARCHITECTURES = NPU_SUPPORTED_ARCHITECTURES if OPENVINO_DEVICE == "NPU" else ALL_SUPPORTED_ARCHITECTURES
     # filter architectures depending on min/max transformers supported versions
@@ -435,12 +434,15 @@ class VLMPipelineTestCase(unittest.TestCase):
         transformers_model = transformers_class.from_pretrained(model_id, trust_remote_code=trust_remote_code).eval()
 
         set_seed(42)
+        # For NPU, convert to fp16 explicitly
+        export_ov_config = OVConfig(dtype="fp16") if OPENVINO_DEVICE == "NPU" else None
         main_export(
             model_name_or_path=model_id,
             trust_remote_code=trust_remote_code,
             task="image-text-to-text",
             convert_tokenizer=True,
             output=self.temp_dir,
+            ov_config=export_ov_config,
         )
         genai_model = VLMPipeline(self.temp_dir, device=OPENVINO_DEVICE, **TEST_CONFIG)
 
@@ -500,10 +502,6 @@ class VLMPipelineTestCase(unittest.TestCase):
             )
 
 
-@pytest.mark.skipif(
-    OPENVINO_DEVICE == "NPU" and is_transformers_version(">=", "5.0"),
-    reason="Speech2Text test on NPU is only supported with transformers < 5.0",
-)
 class Speech2TextPipelineTestCase(unittest.TestCase):
     SUPPORTED_ARCHITECTURES = _test_seq2seq.OVModelForSpeechSeq2SeqIntegrationTest.SUPPORTED_ARCHITECTURES
 
@@ -529,11 +527,14 @@ class Speech2TextPipelineTestCase(unittest.TestCase):
         transformers_model = AutoModelForSpeechSeq2Seq.from_pretrained(model_id).eval()
 
         set_seed(42)
+        # For NPU, convert to fp16 explicitly
+        export_ov_config = OVConfig(dtype="fp16") if OPENVINO_DEVICE == "NPU" else None
         main_export(
             model_name_or_path=model_id,
             task="automatic-speech-recognition-with-past",
             convert_tokenizer=True,
             output=self.temp_dir,
+            ov_config=export_ov_config,
         )
 
         genai_model = WhisperPipeline(self.temp_dir, device=OPENVINO_DEVICE, **TEST_CONFIG)
@@ -595,20 +596,21 @@ class Text2SpeechPipelineTestCase(unittest.TestCase):
     @parameterized.expand(SUPPORTED_ARCHITECTURES, skip_on_empty=True)
     def test_compare_outputs(self, model_arch):
         logger.info("Testing %s on device=%s", model_arch, OPENVINO_DEVICE)
-        if model_arch in ("speecht5",) and is_openvino_version(">=", "2026.1.0"):
-            self.skipTest("CVS-185350: OpenVINO 2026.1.0 inference results mismatch")
         model_id = MODEL_NAMES[model_arch]
 
         set_seed(42)
         transformers_model = AutoModelForTextToSpectrogram.from_pretrained(model_id).eval()
 
         set_seed(42)
+        # For NPU, convert to fp16 explicitly
+        export_ov_config = OVConfig(dtype="fp16") if OPENVINO_DEVICE == "NPU" else None
         main_export(
             model_name_or_path=model_id,
             task="text-to-audio-with-past",
             model_kwargs={"vocoder": self.VOCODER},
             convert_tokenizer=True,
             output=self.temp_dir,
+            ov_config=export_ov_config,
         )
         optimum_model = OVModelForTextToSpeechSeq2Seq.from_pretrained(
             self.temp_dir, device=OPENVINO_DEVICE, ov_config=TEST_CONFIG
@@ -663,6 +665,8 @@ class LLMPipelineWithEagle3TestCase(unittest.TestCase):
         trust_remote_code = model_arch in REMOTE_CODE_MODELS
 
         # export main and draft eagle3 models and initialize OV LLM pipelines w/o Eagle3
+        # For NPU (not yet supported), convert to fp16 explicitly
+        export_ov_config = OVConfig(dtype="fp16") if OPENVINO_DEVICE == "NPU" else None
         draft_model_path = Path(self.temp_dir) / "draft_model"
         main_model_path = Path(self.temp_dir) / "main_model"
         main_export(
@@ -671,12 +675,14 @@ class LLMPipelineWithEagle3TestCase(unittest.TestCase):
             trust_remote_code=trust_remote_code,
             convert_tokenizer=False,
             output=draft_model_path,
+            ov_config=export_ov_config,
         )
         main_export(
             model_name_or_path=target_model_id,
             task="text-generation-with-past",
             convert_tokenizer=True,
             output=main_model_path,
+            ov_config=export_ov_config,
         )
 
         prompt = "Paris is the capital of"
@@ -716,6 +722,8 @@ class LLMPipelineWithEagle3TestCase(unittest.TestCase):
         trust_remote_code = model_arch in REMOTE_CODE_MODELS
 
         # export main (VLM) and draft (Eagle3) models
+        # For NPU (not yet supported), convert to fp16 explicitly
+        export_ov_config = OVConfig(dtype="fp16") if OPENVINO_DEVICE == "NPU" else None
         draft_model_path = Path(self.temp_dir) / "draft_model"
         main_model_path = Path(self.temp_dir) / "main_model"
         main_export(
@@ -724,12 +732,14 @@ class LLMPipelineWithEagle3TestCase(unittest.TestCase):
             trust_remote_code=trust_remote_code,
             convert_tokenizer=False,
             output=draft_model_path,
+            ov_config=export_ov_config,
         )
         main_export(
             model_name_or_path=target_model_id,
             task="image-text-to-text",
             convert_tokenizer=True,
             output=main_model_path,
+            ov_config=export_ov_config,
         )
 
         # Use a small deterministic random video tensor: (num_frames, H, W, 3) uint8

@@ -28,7 +28,6 @@ Usage:
 """
 
 import argparse
-import html as html_lib
 import os
 import re
 import subprocess
@@ -36,6 +35,7 @@ import sys
 from collections import defaultdict
 
 import requests
+
 
 OWNER = os.environ.get("GITHUB_REPOSITORY_OWNER", "helena-intel")
 REPO_NAME = os.environ.get("GITHUB_REPOSITORY", "helena-intel/optimum-intel").split("/")[-1]
@@ -53,8 +53,10 @@ def get_headers():
         except (subprocess.CalledProcessError, FileNotFoundError):
             pass
     if not token:
-        print("ERROR: GITHUB_TOKEN environment variable is required (or authenticate via `gh auth login`).",
-              file=sys.stderr)
+        print(
+            "ERROR: GITHUB_TOKEN environment variable is required (or authenticate via `gh auth login`).",
+            file=sys.stderr,
+        )
         sys.exit(1)
     return {
         "Authorization": f"token {token}",
@@ -134,7 +136,7 @@ def parse_versions_from_log(log_text):
         stripped = timestamp_re.sub("", line).strip()
         for pkg in ("openvino_genai", "openvino", "transformers", "torch"):
             if stripped.startswith(f"{pkg} "):
-                versions[pkg] = stripped[len(pkg) + 1:].strip()
+                versions[pkg] = stripped[len(pkg) + 1 :].strip()
                 break
     return versions
 
@@ -270,8 +272,9 @@ def build_report(run_info, jobs, job_logs):
 
     # If no per-test results found, fall back to job-level conclusions
     if not any(results.values()):
-        print("WARNING: Could not parse per-test results from logs. Using job-level conclusions only.",
-              file=sys.stderr)
+        print(
+            "WARNING: Could not parse per-test results from logs. Using job-level conclusions only.", file=sys.stderr
+        )
         for job in jobs:
             job_name = job["name"]
             version, device, runner = parse_job_name(job_name)
@@ -380,7 +383,7 @@ def build_report(run_info, jobs, job_logs):
     lines.append(header)
     lines.append(separator)
 
-    for version in sorted(set(v for v, _, _ in job_conclusions.keys())):
+    for version in sorted({v for v, _, _ in job_conclusions.keys()}):
         row = f"| {version} |"
         for runner in runners:
             for device in devices:
@@ -422,12 +425,18 @@ def build_xlsx_report(run_info, jobs, job_logs, output_path):
 
     # Parse results (same logic as build_report)
     results = defaultdict(lambda: defaultdict(dict))
+    # Map (version, runner, device) -> job URL for hyperlinks
+    job_urls = {}
 
     for job in jobs:
         job_name = job["name"]
         version, device, runner = parse_job_name(job_name)
         if not version:
             continue
+
+        job_url = job.get("html_url", "")
+        if job_url:
+            job_urls[(version, runner, device)] = job_url
 
         log_content = job_logs.get(job["id"])
         if log_content:
@@ -470,29 +479,41 @@ def build_xlsx_report(run_info, jobs, job_logs, output_path):
         "error": PatternFill(start_color="FFEDD5", end_color="FFEDD5", fill_type="solid"),
     }
 
+    # Build column order for status columns: [(runner, device), ...]
+    col_order = [(runner, device) for runner in runners for device in devices]
+
     # Data rows - sorted by version, then category, then model
+    row_versions = []  # track version per data row for hyperlink lookup
     for version in sorted(results.keys()):
         model_keys = sorted(results[version].keys(), key=lambda x: (x[0], x[1]))
         for category, model_name in model_keys:
             row = [version, category, model_name]
-            for runner in runners:
-                for device in devices:
-                    status = results[version][(category, model_name)].get((runner, device), "")
-                    row.append(status)
+            for runner, device in col_order:
+                status = results[version][(category, model_name)].get((runner, device), "")
+                row.append(status)
             ws.append(row)
+            row_versions.append(version)
 
-    # Apply status fills and center alignment to data cells
+    # Apply status fills, center alignment, and hyperlinks to data cells
+    link_font = Font(underline="single", color="0563C1")
     for row_idx in range(2, ws.max_row + 1):
+        version = row_versions[row_idx - 2]
         # Left-align text columns
         for col_idx in range(1, 4):
             ws.cell(row=row_idx, column=col_idx).alignment = Alignment(horizontal="left")
-        # Center and color status columns
-        for col_idx in range(4, 4 + len(runners) * len(devices)):
+        # Center, color, and hyperlink status columns
+        for col_offset, (runner, device) in enumerate(col_order):
+            col_idx = 4 + col_offset
             cell = ws.cell(row=row_idx, column=col_idx)
             cell.alignment = Alignment(horizontal="center")
             fill = status_fills.get(cell.value)
             if fill:
                 cell.fill = fill
+            # Add hyperlink to the job run
+            url = job_urls.get((version, runner, device))
+            if url and cell.value:
+                cell.hyperlink = url
+                cell.font = link_font
 
     # Auto-fit column widths
     for col in ws.columns:
@@ -517,7 +538,8 @@ def markdown_to_html(md_text):
     """
     html_lines = []
 
-    html_lines.append("""<!DOCTYPE html>
+    html_lines.append(
+        """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -541,21 +563,19 @@ p { margin: 4px 0; }
 </style>
 </head>
 <body>
-""")
+"""
+    )
 
     in_table = False
-    in_details = False
     lines = md_text.split("\n")
 
     for line in lines:
         # Details blocks (pass through)
         if line.strip().startswith("<details"):
             html_lines.append(line)
-            in_details = True
             continue
         if line.strip() == "</details>":
             html_lines.append(line)
-            in_details = False
             continue
         if line.strip().startswith("<summary"):
             html_lines.append(line)
@@ -618,18 +638,24 @@ def main():
     parser.add_argument("--run-id", type=int, help="Specific workflow run ID (default: latest completed)")
     parser.add_argument("--output", "-o", type=str, help="Output file path (default: stdout)")
     parser.add_argument("--html", action="store_true", help="Also generate an HTML version of the report")
-    parser.add_argument("--xlsx", action="store_true",
-                        help="Generate an Excel (.xlsx) report with a single sheet and transformers version as column")
-    parser.add_argument("--no-logs", action="store_true",
-                        help="Skip downloading logs (only show job-level conclusions)")
+    parser.add_argument(
+        "--xlsx",
+        action="store_true",
+        help="Generate an Excel (.xlsx) report with a single sheet and transformers version as column",
+    )
+    parser.add_argument(
+        "--no-logs", action="store_true", help="Skip downloading logs (only show job-level conclusions)"
+    )
     args = parser.parse_args()
 
     print("Fetching workflow run info...", file=sys.stderr)
     run_info = get_latest_run(args.run_id)
     run_id = run_info["id"]
-    print(f"  Run #{run_info['run_number']} (ID: {run_id}), "
-          f"status: {run_info.get('conclusion', run_info['status'])}",
-          file=sys.stderr)
+    print(
+        f"  Run #{run_info['run_number']} (ID: {run_id}), "
+        f"status: {run_info.get('conclusion', run_info['status'])}",
+        file=sys.stderr,
+    )
 
     print("Fetching jobs...", file=sys.stderr)
     jobs = get_jobs(run_id)

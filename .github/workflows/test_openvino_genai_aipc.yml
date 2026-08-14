@@ -53,10 +53,11 @@ jobs:
         run: |
           %RUNNER_TEMP%\venv\Scripts\python -m uv pip install "sentencepiece==0.2.1"
 
-      - name: Install OpenVINO GenAI nightly
-        shell: cmd
-        run: |
-          %RUNNER_TEMP%\venv\Scripts\python -m uv pip install --pre --upgrade "openvino-genai>=2026.3.0.0.rc2,<2026.4.0.0" --extra-index-url https://storage.openvinotoolkit.org/simple/wheels/nightly
+      # uncomment for testing with nightly
+      # - name: Install OpenVINO GenAI nightly
+      #  shell: cmd
+      #  run: |
+      #    %RUNNER_TEMP%\venv\Scripts\python -m uv pip install --pre --upgrade "openvino-genai>=2026.4.0.0,<2026.5.0.0" --extra-index-url https://storage.openvinotoolkit.org/simple/wheels/nightly
 
       - name: Pip freeze
         shell: cmd
@@ -106,7 +107,7 @@ jobs:
             --run-id ${{ github.run_id }} \
             --html \
             --xlsx \
-            --output report.md
+            --output optimum-genai-test-report.md
 
       - name: Upload report artifact
         uses: actions/upload-artifact@v4
