@@ -5815,6 +5815,69 @@ class Gemma3nLMModelPatcher(Gemma3LMModelPatcher):
         )
 
 
+# OpenVINO's 16-bit tracing patch (openvino.frontend.pytorch.patch_model.__make_16bit_traceable)
+# only keeps nn.Linear/nn.Embedding weights in their original bf16/fp16 dtype; any other module's
+# parameters (including Gemma4TextExperts' fused 3D `gate_up_proj`/`down_proj`) are upcast to fp32,
+# which doubles the (very large) MoE weight memory during export. Temporarily replacing the fused
+# tensors with per-expert nn.Linear views (no data copy) lets OpenVINO recognize and preserve them.
+def _install_gemma4_expert_linears(experts):
+    gate_up_proj = experts.gate_up_proj
+    down_proj = experts.down_proj
+
+    gate_up_linears = torch.nn.ModuleList()
+    down_linears = torch.nn.ModuleList()
+    for expert_idx in range(experts.num_experts):
+        gate_up_linear = torch.nn.Linear(experts.hidden_dim, 2 * experts.intermediate_dim, bias=False)
+        gate_up_linear.weight = torch.nn.Parameter(gate_up_proj[expert_idx], requires_grad=False)
+        gate_up_linears.append(gate_up_linear)
+
+        down_linear = torch.nn.Linear(experts.intermediate_dim, experts.hidden_dim, bias=False)
+        down_linear.weight = torch.nn.Parameter(down_proj[expert_idx], requires_grad=False)
+        down_linears.append(down_linear)
+
+    delattr(experts, "gate_up_proj")
+    delattr(experts, "down_proj")
+    experts.gate_up_linears = gate_up_linears
+    experts.down_linears = down_linears
+    return gate_up_proj, down_proj
+
+
+def _restore_gemma4_expert_linears(experts, gate_up_proj, down_proj):
+    del experts.gate_up_linears
+    del experts.down_linears
+    experts.gate_up_proj = gate_up_proj
+    experts.down_proj = down_proj
+
+
+# Dense MoE forward equivalent to lfm2_moe_experts_forward (all experts run on every token, so the
+# traced graph is correct regardless of the routing taken by the dummy export inputs), but using
+# per-expert nn.Linear calls instead of the fused-tensor torch.bmm so the weights stay 16-bit
+# traceable, see `_install_gemma4_expert_linears` above.
+def gemma4_moe_experts_forward_16bit_safe(
+    self,
+    hidden_states: torch.Tensor,
+    top_k_index: torch.Tensor,
+    top_k_weights: torch.Tensor,
+) -> torch.Tensor:
+    routing_weights = top_k_weights.to(hidden_states.dtype)
+    num_tokens = hidden_states.shape[0]
+    num_experts = self.num_experts
+
+    dense_routing_weights = torch.zeros(
+        num_tokens, num_experts, device=hidden_states.device, dtype=hidden_states.dtype
+    )
+    dense_routing_weights.scatter_(dim=1, index=top_k_index, src=routing_weights)
+
+    final_hidden_states = torch.zeros_like(hidden_states)
+    for expert_idx in range(num_experts):
+        gate, up = self.gate_up_linears[expert_idx](hidden_states).chunk(2, dim=-1)
+        current_hidden_states = self.act_fn(gate) * up
+        current_hidden_states = self.down_linears[expert_idx](current_hidden_states)
+        final_hidden_states = final_hidden_states + current_hidden_states * dense_routing_weights[:, expert_idx, None]
+
+    return final_hidden_states
+
+
 class Gemma4LMModelPatcher(Gemma3LMModelPatcher):
     def __init__(self, config, model, model_kwargs):
         super().__init__(config, model, model_kwargs)
@@ -5824,6 +5887,7 @@ class Gemma4LMModelPatcher(Gemma3LMModelPatcher):
         self.orig_forward = gemma4_lm_forward
 
         self.model_orig_language_model_forward = self._model.model.forward
+        self._experts_orig_params = []
 
     def __enter__(self):
         super().__enter__()
@@ -5834,8 +5898,11 @@ class Gemma4LMModelPatcher(Gemma3LMModelPatcher):
             decoder_layer.self_attn.orig_forward = decoder_layer.self_attn.forward
             decoder_layer.self_attn.forward = types.MethodType(gemma4_text_attention_forward, decoder_layer.self_attn)
             if hasattr(decoder_layer, "experts"):
-                decoder_layer.experts._orig_forward = decoder_layer.experts.forward
-                decoder_layer.experts.forward = types.MethodType(lfm2_moe_experts_forward, decoder_layer.experts)
+                experts = decoder_layer.experts
+                experts._orig_forward = experts.forward
+                gate_up_proj, down_proj = _install_gemma4_expert_linears(experts)
+                self._experts_orig_params.append((experts, gate_up_proj, down_proj))
+                experts.forward = types.MethodType(gemma4_moe_experts_forward_16bit_safe, experts)
 
     def __exit__(self, exc_type, exc_value, traceback):
         super().__exit__(exc_type, exc_value, traceback)
@@ -5844,6 +5911,11 @@ class Gemma4LMModelPatcher(Gemma3LMModelPatcher):
             decoder_layer.self_attn.forward = decoder_layer.self_attn.orig_forward
             if hasattr(decoder_layer, "experts") and hasattr(decoder_layer.experts, "_orig_forward"):
                 decoder_layer.experts.forward = decoder_layer.experts._orig_forward
+                del decoder_layer.experts._orig_forward
+
+        for experts, gate_up_proj, down_proj in self._experts_orig_params:
+            _restore_gemma4_expert_linears(experts, gate_up_proj, down_proj)
+        self._experts_orig_params = []
 
         setattr(self._model, self.orig_forward_name, self.model_orig_forward)
         setattr(self._model.model, "forward", self.model_orig_language_model_forward)
