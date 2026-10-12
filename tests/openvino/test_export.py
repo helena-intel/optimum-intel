@@ -15,6 +15,8 @@
 
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import openvino as ov
 import torch
@@ -31,6 +33,7 @@ from utils_tests import (
 )
 
 from optimum.exporters.openvino import export_from_model, main_export
+from optimum.exporters.openvino.convert import _save_model
 from optimum.exporters.openvino.model_configs import (
     BertOpenVINOConfig,
     LTX2TextEncoderOpenVINOConfig,
@@ -84,6 +87,27 @@ from optimum.utils.testing_utils import require_diffusers
 
 
 logger = logging.get_logger()
+
+
+class ExportInMemoryQuantizationTest(unittest.TestCase):
+    @patch("optimum.exporters.openvino.convert.save_model")
+    @patch("optimum.exporters.openvino.convert._add_runtime_options_to_rt_info", side_effect=lambda model, _: model)
+    @patch("optimum.exporters.openvino.convert._add_version_info_to_model", side_effect=lambda model, _: model)
+    @patch("optimum.intel.openvino.quantization._weight_only_quantization")
+    def test_weight_only_quantization_uses_in_memory_model(
+        self, compress_weights, add_version_info, add_runtime_options, save_model
+    ):
+        model = Mock()
+        compressed_model = Mock()
+        quantization_config = Mock()
+        compress_weights.return_value = compressed_model
+        config = SimpleNamespace(runtime_options={})
+        ov_config = SimpleNamespace(dtype="fp32", quantization_config=quantization_config)
+
+        _save_model(model, "model.xml", ov_config=ov_config, config=config)
+
+        compress_weights.assert_called_once_with(model, quantization_config)
+        save_model.assert_called_once_with(compressed_model, "model.xml", False)
 
 
 class ExportModelTest(unittest.TestCase):

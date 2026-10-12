@@ -168,6 +168,17 @@ def _save_model(
     }:
         add_hidden_states_rt_info(source_model, model, config)
 
+    quantization_config = None if ov_config is None else ov_config.quantization_config
+    if quantization_config:
+        from optimum.intel.openvino.configuration import _GPTOSSQuantizationConfig
+        from optimum.intel.openvino.quantization import _weight_only_quantization
+
+        if isinstance(quantization_config, _GPTOSSQuantizationConfig):
+            model = _weight_only_quantization(model, quantization_config.quantization_config1)
+            model = _weight_only_quantization(model, quantization_config.quantization_config2, verify_not_optimized=False)
+        else:
+            model = _weight_only_quantization(model, quantization_config)
+
     save_model(model, path, compress_to_fp16)
     del model
     gc.collect()

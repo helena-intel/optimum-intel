@@ -348,7 +348,6 @@ class OVExportCommand(BaseOptimumCLICommand):
             _DEFAULT_3BIT_WQ_CONFIG,
             _DEFAULT_4BIT_WQ_CONFIG,
             OVConfig,
-            _GPTOSSQuantizationConfig,
             get_default_quantization_config,
         )
         from ...intel.openvino.utils import TemporaryDirectory
@@ -464,10 +463,9 @@ class OVExportCommand(BaseOptimumCLICommand):
         temporary_directory = None
         original_output = None
         quantization_config = None if ov_config is None else ov_config.quantization_config
-        # We apply main_quantize only if quantization_config is explicitly provided and it is not a GPT-OSS workaround config.
-        # Otherwise, quantization can still be applied inside main_export if a model has more than 1B parameters.
-        # TODO: Remove GPT-OSS workaround when possible
-        apply_main_quantize = quantization_config and not isinstance(quantization_config, _GPTOSSQuantizationConfig)
+        # Weight-only compression is applied to the in-memory OpenVINO model during export. Full quantization still
+        # requires the exported IR to collect calibration statistics.
+        apply_main_quantize = self.args.weight_format is None and quantization_config is not None
         if apply_main_quantize:
             # In case main_quantize will be applied, export to a temporary directory first. This is to avoid confusion
             # in the case when quantization unexpectedly fails, and an intermediate floating point model ends up at the
