@@ -15,6 +15,8 @@
 
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import openvino as ov
 import torch
@@ -31,6 +33,7 @@ from utils_tests import (
 )
 
 from optimum.exporters.openvino import export_from_model, main_export
+from optimum.exporters.openvino.convert import _save_model
 from optimum.exporters.openvino.model_configs import (
     BertOpenVINOConfig,
     LTX2TextEncoderOpenVINOConfig,
@@ -578,3 +581,24 @@ class CustomExportModelTest(unittest.TestCase):
         ov_outputs = ov_model(**tokens)
         self.assertTrue(torch.allclose(ov_outputs.token_embeddings, model_outputs.token_embeddings, atol=1e-4))
         self.assertTrue(torch.allclose(ov_outputs.sentence_embedding, model_outputs.sentence_embedding, atol=1e-4))
+
+
+class ExportPrecisionTest(unittest.TestCase):
+    def test_int4_intermediate_model_is_saved_as_fp16(self):
+        model = object()
+        config = SimpleNamespace(runtime_options={}, eagle3=False, dflash=False)
+        save_flags = []
+
+        def record_save_model(_model, _path, compress_to_fp16):
+            save_flags.append(compress_to_fp16)
+
+        with (
+            patch("optimum.exporters.openvino.convert._add_version_info_to_model", return_value=model),
+            patch("optimum.exporters.openvino.convert._add_runtime_options_to_rt_info", return_value=model),
+            patch("optimum.exporters.openvino.convert.save_model", side_effect=record_save_model),
+        ):
+            for dtype in ("int4", "int8", "fp16", "fp32"):
+                with self.subTest(dtype=dtype):
+                    _save_model(model, "model.xml", SimpleNamespace(dtype=dtype), config=config)
+
+        self.assertEqual(save_flags, [True, False, True, False])

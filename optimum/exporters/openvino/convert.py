@@ -148,7 +148,7 @@ def _save_model(
     config: "OpenVINOConfig" = None,
     source_model=None,
 ):
-    compress_to_fp16 = ov_config is not None and ov_config.dtype == "fp16"
+    compress_to_fp16 = ov_config is not None and ov_config.dtype in {"fp16", "int4"}
     model = _add_version_info_to_model(model, library_name)
 
     runtime_options = config.runtime_options if hasattr(config, "runtime_options") else {}
