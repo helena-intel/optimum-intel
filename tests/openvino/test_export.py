@@ -13,8 +13,10 @@
 # limitations under the License.
 
 
+import os
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -584,6 +586,31 @@ class CustomExportModelTest(unittest.TestCase):
 
 
 class ExportPrecisionTest(unittest.TestCase):
+    def test_constant_storage_diagnostics(self):
+        config = SimpleNamespace(runtime_options={}, eagle3=False, dflash=False)
+        for dtype, source_type, saved_type, source_bytes, saved_bytes in (
+            ("int4", ov.Type.f32, "f16", 8, 4),
+            ("fp32", ov.Type.f32, "f32", 8, 8),
+            ("fp32", ov.Type.f16, "f16", 4, 4),
+        ):
+            with self.subTest(dtype=dtype, source_type=source_type), TemporaryDirectory() as directory:
+                parameter = ov.opset13.parameter([2], source_type)
+                constant = ov.opset13.constant([1.0, 2.0], dtype=source_type)
+                model = ov.Model([ov.opset13.add(parameter, constant)], [parameter])
+                path = Path(directory) / "model.xml"
+                with (
+                    patch.dict(os.environ, {"OV_EXPORT_PRECISION_STATS": "1"}),
+                    self.assertLogs("optimum.exporters.openvino.convert", level="INFO") as captured,
+                ):
+                    _save_model(model, path, SimpleNamespace(dtype=dtype), config=config)
+                messages = "\n".join(captured.output)
+                self.assertIn("Constant storage (before save)", messages)
+                self.assertIn("Constant storage (saved IR)", messages)
+                self.assertIn(f"dtype={source_type.get_type_name()} constants=1 bytes={source_bytes}", messages)
+                self.assertIn(f"dtype={saved_type} constants=1 bytes={saved_bytes}", messages)
+                self.assertIn(f"bin_bytes={path.with_suffix('.bin').stat().st_size}", messages)
+                self.assertFalse(any("Could not collect" in message for message in captured.output))
+
     def test_int4_intermediate_model_is_saved_as_fp16(self):
         model = object()
         config = SimpleNamespace(runtime_options={}, eagle3=False, dflash=False)
@@ -593,12 +620,15 @@ class ExportPrecisionTest(unittest.TestCase):
             save_flags.append(compress_to_fp16)
 
         with (
+            patch.dict(os.environ, {"OV_EXPORT_PRECISION_STATS": "0"}),
             patch("optimum.exporters.openvino.convert._add_version_info_to_model", return_value=model),
             patch("optimum.exporters.openvino.convert._add_runtime_options_to_rt_info", return_value=model),
             patch("optimum.exporters.openvino.convert.save_model", side_effect=record_save_model),
+            patch("optimum.exporters.openvino.convert._log_constant_storage") as diagnostics,
         ):
             for dtype in ("int4", "int8", "fp16", "fp32"):
                 with self.subTest(dtype=dtype):
                     _save_model(model, "model.xml", SimpleNamespace(dtype=dtype), config=config)
 
         self.assertEqual(save_flags, [True, False, True, False])
+        diagnostics.assert_not_called()

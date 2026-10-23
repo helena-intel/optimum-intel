@@ -17,7 +17,9 @@ import functools
 import gc
 import inspect
 import logging
+import math
 import os
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, List, Optional, Tuple, Union
 
@@ -140,6 +142,45 @@ def _set_runtime_options(
             sub_export_config.runtime_options["ACTIVATIONS_SCALE_FACTOR"] = "8.0"
 
 
+def _log_constant_storage(path, compress_to_fp16, model=None):
+    try:
+        statistics = {}
+        if model is not None:
+            for node in model.get_ops():
+                if node.get_type_name() != "Constant":
+                    continue
+                element_type = node.get_output_element_type(0)
+                size = (math.prod(node.get_output_shape(0)) * element_type.bitwidth + 7) // 8
+                totals = statistics.setdefault(element_type.get_type_name(), [0, 0])
+                totals[0] += 1
+                totals[1] += size
+            stage = "before save"
+            binary_size = None
+        else:
+            with Path(path).open("rb") as xml_file:
+                for _, layer in ET.iterparse(xml_file, events=("end",)):
+                    if layer.tag != "layer":
+                        continue
+                    if layer.get("type") == "Const":
+                        data = layer.find("data")
+                        totals = statistics.setdefault(data.attrib["element_type"], [0, 0])
+                        totals[0] += 1
+                        totals[1] += int(data.attrib["size"])
+                    layer.clear()
+            stage = "saved IR"
+            binary_size = Path(path).with_suffix(".bin").stat().st_size
+
+        logger.info("Constant storage (%s): path=%s compress_to_fp16=%s", stage, path, compress_to_fp16)
+        for dtype, (count, size) in sorted(statistics.items()):
+            logger.info("  dtype=%s constants=%d bytes=%d GiB=%.6f", dtype, count, size, size / 2**30)
+        total_size = sum(size for _, size in statistics.values())
+        logger.info("  total_constant_bytes=%d GiB=%.6f", total_size, total_size / 2**30)
+        if binary_size is not None:
+            logger.info("  bin_bytes=%d GiB=%.6f", binary_size, binary_size / 2**30)
+    except Exception as error:
+        logger.warning("Could not collect constant storage diagnostics for %s: %s", path, error)
+
+
 def _save_model(
     model,
     path: str,
@@ -173,7 +214,12 @@ def _save_model(
     }:
         add_hidden_states_rt_info(source_model, model, config)
 
+    log_constant_storage = os.getenv("OV_EXPORT_PRECISION_STATS", "0") == "1"
+    if log_constant_storage:
+        _log_constant_storage(path, compress_to_fp16, model=model)
     save_model(model, path, compress_to_fp16)
+    if log_constant_storage:
+        _log_constant_storage(path, compress_to_fp16)
     del model
     gc.collect()
 
