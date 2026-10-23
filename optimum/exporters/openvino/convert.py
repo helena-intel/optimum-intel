@@ -170,13 +170,13 @@ def _log_constant_storage(path, compress_to_fp16, model=None):
             stage = "saved IR"
             binary_size = Path(path).with_suffix(".bin").stat().st_size
 
-        logger.info("Constant storage (%s): path=%s compress_to_fp16=%s", stage, path, compress_to_fp16)
+        logger.warning("Constant storage (%s): path=%s compress_to_fp16=%s", stage, path, compress_to_fp16)
         for dtype, (count, size) in sorted(statistics.items()):
-            logger.info("  dtype=%s constants=%d bytes=%d GiB=%.6f", dtype, count, size, size / 2**30)
+            logger.warning("  dtype=%s constants=%d bytes=%d GiB=%.6f", dtype, count, size, size / 2**30)
         total_size = sum(size for _, size in statistics.values())
-        logger.info("  total_constant_bytes=%d GiB=%.6f", total_size, total_size / 2**30)
+        logger.warning("  total_constant_bytes=%d GiB=%.6f", total_size, total_size / 2**30)
         if binary_size is not None:
-            logger.info("  bin_bytes=%d GiB=%.6f", binary_size, binary_size / 2**30)
+            logger.warning("  bin_bytes=%d GiB=%.6f", binary_size, binary_size / 2**30)
     except Exception as error:
         logger.warning("Could not collect constant storage diagnostics for %s: %s", path, error)
 

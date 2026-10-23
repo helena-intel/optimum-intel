@@ -600,7 +600,7 @@ class ExportPrecisionTest(unittest.TestCase):
                 path = Path(directory) / "model.xml"
                 with (
                     patch.dict(os.environ, {"OV_EXPORT_PRECISION_STATS": "1"}),
-                    self.assertLogs("optimum.exporters.openvino.convert", level="INFO") as captured,
+                    self.assertLogs("optimum.exporters.openvino.convert", level="WARNING") as captured,
                 ):
                     _save_model(model, path, SimpleNamespace(dtype=dtype), config=config)
                 messages = "\n".join(captured.output)
