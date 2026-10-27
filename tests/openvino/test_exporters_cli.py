@@ -662,7 +662,7 @@ class OVCLIExportTestCase(unittest.TestCase):
         (
             "image-text-to-text",
             "llava_next",
-            'int4 --group-size 16 --ratio 0.8 --sensitivity-metric "hessian_input_activation" '
+            'int4 --group-size 16 --ratio 0.8 --sensitivity-metric "mean_activation_magnitude" '
             "--dataset textvqa --num-samples 1",
             {
                 "lm_model": {"int8": 6, "int4": 24},
@@ -694,7 +694,7 @@ class OVCLIExportTestCase(unittest.TestCase):
         (
             "image-text-to-text",
             "llava_next_video",
-            'int4 --group-size 16 --ratio 0.8 --sensitivity-metric "hessian_input_activation" '
+            'int4 --group-size 16 --ratio 0.8 --sensitivity-metric "mean_activation_magnitude" '
             "--dataset textvqa --num-samples 1",
             {
                 "lm_model": {"int8": 6, "int4": 24},
