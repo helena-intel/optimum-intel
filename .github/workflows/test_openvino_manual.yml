@@ -46,7 +46,7 @@ jobs:
           TRANSFORMERS_VERSION: ${{ inputs.transformers-version }}
         run: |
           pip install --upgrade pip uv
-          requirements=(".[tests,diffusers]" librosa)
+          requirements=(".[tests,diffusers]" librosa "pyarrow<21")
           if [[ "$TRANSFORMERS_VERSION" == "latest" ]]; then
             requirements+=(transformers)
           else
@@ -73,7 +73,11 @@ jobs:
         run: |
           from importlib.metadata import version
 
-          for package in ("optimum", "optimum-intel", "transformers", "diffusers", "huggingface-hub", "torch", "torchvision"):
+          packages = (
+              "optimum", "optimum-intel", "transformers", "diffusers", "huggingface-hub",
+              "torch", "torchvision", "datasets", "pyarrow",
+          )
+          for package in packages:
               print(f"{package}=={version(package)}", flush=True)
 
           from optimum.intel.openvino.modeling_diffusion import OVFlux2KleinPipeline
