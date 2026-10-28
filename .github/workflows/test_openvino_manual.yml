@@ -48,6 +48,7 @@ jobs:
         run: |
           pip install --upgrade pip uv
           requirements=(".[tests,diffusers]" librosa "datasets==3.6.0" "fsspec==2025.3.0" "pyarrow==26.0.0")
+          requirements+=("torch==2.14.1+cpu" "torchvision==0.29.1+cpu")
           if [[ "$TRANSFORMERS_VERSION" == "latest" ]]; then
             requirements+=(transformers)
           else
