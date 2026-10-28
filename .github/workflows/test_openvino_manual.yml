@@ -25,6 +25,7 @@ env:
   UV_TORCH_BACKEND: cpu
   UV_SYSTEM_PYTHON: true
   TRANSFORMERS_IS_CI: true
+  PYTHONFAULTHANDLER: "1"
   HF_TOKEN: ${{ secrets.HF_HUB_READ_TOKEN }}
 
 jobs:
@@ -46,7 +47,7 @@ jobs:
           TRANSFORMERS_VERSION: ${{ inputs.transformers-version }}
         run: |
           pip install --upgrade pip uv
-          requirements=(".[tests,diffusers]" librosa "pyarrow<21")
+          requirements=(".[tests,diffusers]" librosa "datasets==3.6.0" "fsspec==2025.3.0" "pyarrow==26.0.0")
           if [[ "$TRANSFORMERS_VERSION" == "latest" ]]; then
             requirements+=(transformers)
           else
@@ -75,7 +76,7 @@ jobs:
 
           packages = (
               "optimum", "optimum-intel", "transformers", "diffusers", "huggingface-hub",
-              "torch", "torchvision", "datasets", "pyarrow",
+              "torch", "torchvision", "datasets", "fsspec", "pyarrow",
           )
           for package in packages:
               print(f"{package}=={version(package)}", flush=True)

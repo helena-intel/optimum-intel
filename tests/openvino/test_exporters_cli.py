@@ -662,7 +662,7 @@ class OVCLIExportTestCase(unittest.TestCase):
         (
             "image-text-to-text",
             "llava_next",
-            'int4 --group-size 16 --ratio 0.8 --sensitivity-metric "mean_activation_magnitude" '
+                        'int4 --group-size 16 --ratio 0.8 --sensitivity-metric "hessian_input_activation" '
             "--dataset textvqa --num-samples 1",
             {
                 "lm_model": {"int8": 6, "int4": 24},
@@ -694,7 +694,7 @@ class OVCLIExportTestCase(unittest.TestCase):
         (
             "image-text-to-text",
             "llava_next_video",
-            'int4 --group-size 16 --ratio 0.8 --sensitivity-metric "mean_activation_magnitude" '
+                        'int4 --group-size 16 --ratio 0.8 --sensitivity-metric "hessian_input_activation" '
             "--dataset textvqa --num-samples 1",
             {
                 "lm_model": {"int8": 6, "int4": 24},
@@ -1321,12 +1321,17 @@ class OVCLIExportTestCase(unittest.TestCase):
         is_prequantized = option is None
         with TemporaryDirectory() as tmpdir:
             weight_format = "" if is_prequantized else f"--weight-format {option}"
-            result = subprocess.run(
-                f"optimum-cli export openvino --model {MODEL_NAMES[model_type]} --task {task} {weight_format} {tmpdir}",
-                shell=True,
-                check=True,
-                capture_output=True,
-            )
+            try:
+                result = subprocess.run(
+                    f"optimum-cli export openvino --model {MODEL_NAMES[model_type]} --task {task} {weight_format} {tmpdir}",
+                    shell=True,
+                    check=True,
+                    capture_output=True,
+                )
+            except subprocess.CalledProcessError as error:
+                print("STDOUT:\n", (error.stdout or b"").decode(errors="replace"), flush=True)
+                print("STDERR:\n", (error.stderr or b"").decode(errors="replace"), flush=True)
+                raise
             model_kwargs = {"use_cache": task.endswith("with-past")} if "generation" in task else {}
             if not is_prequantized and "--trust-remote-code" in option:
                 model_kwargs["trust_remote_code"] = True
