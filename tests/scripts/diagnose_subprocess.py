@@ -27,7 +27,7 @@ class SynchronousFragment:
     def to_batches(self, **kwargs):
         global synchronous_scans
         if kwargs.get("filter") is not None:
-            raise ValueError("The synchronous probe supports only unfiltered Parquet reads")
+            raise ValueError("The synchronous diagnostic control supports only unfiltered Parquet reads")
         synchronous_scans += 1
         print(
             f"Synchronous Parquet scan {synchronous_scans}: ParquetFile.iter_batches, "
@@ -55,7 +55,25 @@ class SynchronousFormat:
 
 
 arrow_dataset.ParquetFileFormat = SynchronousFormat
-print("Enabled probe-only synchronous Parquet control", flush=True)
+print("Enabled child-only synchronous Parquet control", flush=True)
+"""
+
+
+SYNCHRONOUS_CLI = """
+import sys
+
+from optimum.commands.optimum_cli import main
+
+sys.argv[0] = "optimum-cli"
+exit_code = main()
+textvqa_requested = any(
+    option == "--dataset" and value == "textvqa"
+    for option, value in zip(sys.argv[1:], sys.argv[2:])
+)
+if textvqa_requested and synchronous_scans == 0:
+    raise RuntimeError("Synchronous Parquet control was not exercised by the TextVQA export")
+print(f"Synchronous CLI completed; intercepted {synchronous_scans} Parquet scans", flush=True)
+sys.exit(exit_code)
 """
 
 
@@ -152,11 +170,11 @@ def main():
     args = parser.parse_args()
     if args.timeout <= 0:
         parser.error("--timeout must be positive")
-    if args.synchronous_parquet and not args.probe_textvqa:
-        parser.error("--synchronous-parquet requires --probe-textvqa")
     command = args.command
     if command[:1] == ["--"]:
         command = command[1:]
+    if args.synchronous_parquet and not args.probe_textvqa and command[:1] != ["optimum-cli"]:
+        parser.error("--synchronous-parquet requires --probe-textvqa or an optimum-cli command")
     if args.probe_textvqa:
         if command:
             parser.error("--probe-textvqa cannot be combined with a command")
@@ -166,6 +184,8 @@ def main():
         command = [sys.executable, "-u", "-c", probe_code]
         if args.synchronous_parquet:
             command.append("--synchronous-parquet")
+    elif args.synchronous_parquet:
+        command = [sys.executable, "-u", "-c", SYNCHRONOUS_PARQUET_SETUP + SYNCHRONOUS_CLI, *command[1:]]
     if not command:
         parser.error("provide a command or --probe-textvqa")
     return run_with_diagnostics(command, args.timeout)
