@@ -56,11 +56,11 @@ jobs:
           key: hf-models
 
       - if: ${{ inputs.transformers-version != 'latest' }}
-        name: Install transformers
+        name: Resolve test dependencies with selected Transformers
         env:
           TRANSFORMERS_VERSION: ${{ inputs.transformers-version }}
         run: |
-          uv pip install "transformers==$TRANSFORMERS_VERSION"
+          uv pip install ".[tests,diffusers]" librosa "transformers==$TRANSFORMERS_VERSION"
 
       - if: ${{ inputs.transformers-version == '4.57.6' || inputs.transformers-version == '5.5.4' }}
         name: Pin diffusers for older Transformers compatibility
