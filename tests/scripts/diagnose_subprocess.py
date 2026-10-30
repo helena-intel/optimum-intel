@@ -8,16 +8,27 @@ import sys
 
 
 TEXTVQA_PROBE = """
+import gc
+
 from datasets import load_dataset
 
 print("Loading streaming TextVQA validation", flush=True)
 dataset = load_dataset("lmms-lab/textvqa", split="validation", streaming=True)
 dataset = dataset.shuffle(seed=42).take(1)
 records = iter(dataset)
-record = next(records)
-image = record["image"]
-image.load()
-print(f"Decoded one image: {image.size}; question present: {'question' in record}", flush=True)
+try:
+    record = next(records)
+    image = record["image"]
+    image.load()
+    print(f"Decoded one image: {image.size}; question present: {'question' in record}", flush=True)
+finally:
+    print("Closing streaming iterator before interpreter shutdown", flush=True)
+    records.close()
+    print("Streaming iterator closed", flush=True)
+del records, record, image, dataset
+print("Collecting garbage before interpreter shutdown", flush=True)
+collected = gc.collect()
+print(f"Explicit cleanup completed; collected {collected} objects", flush=True)
 print("Dataset-only probe entering interpreter shutdown", flush=True)
 """
 
