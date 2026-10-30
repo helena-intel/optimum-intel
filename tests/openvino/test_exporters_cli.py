@@ -1323,7 +1323,9 @@ class OVCLIExportTestCase(unittest.TestCase):
         is_prequantized = option is None
         with TemporaryDirectory() as tmpdir:
             weight_format = "" if is_prequantized else f"--weight-format {option}"
-            command = f"optimum-cli export openvino --model {MODEL_NAMES[model_type]} --task {task} {weight_format} {tmpdir}"
+            command = (
+                f"optimum-cli export openvino --model {MODEL_NAMES[model_type]} --task {task} {weight_format} {tmpdir}"
+            )
             diagnostic_timeout = os.environ.get("OV_CLI_DIAGNOSTICS_TIMEOUT")
             if diagnostic_timeout and sys.platform.startswith("linux"):
                 command = [
