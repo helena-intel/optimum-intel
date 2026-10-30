@@ -12,10 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
-import os
-import shlex
 import subprocess
-import sys
 import unittest
 from pathlib import Path
 from typing import Dict
@@ -1324,29 +1321,10 @@ class OVCLIExportTestCase(unittest.TestCase):
         is_prequantized = option is None
         with TemporaryDirectory() as tmpdir:
             weight_format = "" if is_prequantized else f"--weight-format {option}"
-            command = (
-                f"optimum-cli export openvino --model {MODEL_NAMES[model_type]} --task {task} {weight_format} {tmpdir}"
-            )
-            diagnostic_timeout = os.environ.get("OV_CLI_DIAGNOSTICS_TIMEOUT")
-            synchronous_parquet = False
-            if diagnostic_timeout and sys.platform.startswith("linux"):
-                synchronous_parquet = os.environ.get("OV_CLI_SYNCHRONOUS_PARQUET") == "1"
-                child_command = (
-                    ["--synchronous-parquet", "--", *shlex.split(command)]
-                    if synchronous_parquet
-                    else ["--", "bash", "-c", f"exec {command}"]
-                )
-                command = [
-                    sys.executable,
-                    str(Path(__file__).resolve().parents[1] / "scripts" / "diagnose_subprocess.py"),
-                    "--timeout",
-                    diagnostic_timeout,
-                    *child_command,
-                ]
             try:
                 result = subprocess.run(
-                    command,
-                    shell=isinstance(command, str),
+                    f"optimum-cli export openvino --model {MODEL_NAMES[model_type]} --task {task} {weight_format} {tmpdir}",
+                    shell=True,
                     check=True,
                     capture_output=True,
                 )
@@ -1354,9 +1332,6 @@ class OVCLIExportTestCase(unittest.TestCase):
                 print("STDOUT:\n", (error.stdout or b"").decode(errors="replace"), flush=True)
                 print("STDERR:\n", (error.stderr or b"").decode(errors="replace"), flush=True)
                 raise
-            if synchronous_parquet and "--dataset textvqa" in (option or ""):
-                self.assertIn(b"Synchronous Parquet scan", result.stdout)
-                self.assertIn(b"Synchronous CLI completed; intercepted", result.stdout)
             model_kwargs = {"use_cache": task.endswith("with-past")} if "generation" in task else {}
             if not is_prequantized and "--trust-remote-code" in option:
                 model_kwargs["trust_remote_code"] = True

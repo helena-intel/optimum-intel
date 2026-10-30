@@ -30,8 +30,7 @@ env:
 
 jobs:
   test:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    runs-on: ubuntu-22.04
     permissions:
       contents: read
     steps:
@@ -41,7 +40,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.13"
+          python-version: "3.11"
 
       - name: Install dependencies
         run: |
@@ -87,33 +86,10 @@ jobs:
         if: env.HF_TOKEN == ''
         run: python tests/scripts/login_with_ci_token.py
 
-      - name: Report diagnostic environment
-        run: |
-          uname -a
-          lscpu
-          nproc
-          free -h
-          df -h / /dev/shm
-          python -VV
-          uv pip freeze
-
-      - name: Check dependency consistency
-        continue-on-error: true
-        run: uv pip check
-
-      - name: Install native debugger
-        id: native_debugger
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes gdb
-
       - name: Test with Pytest
-        timeout-minutes: 15
         env:
           TEST_FILE: ${{ inputs.test-file }}
           PYTEST_ARGS: ${{ inputs.pytest-args }}
-          OV_CLI_DIAGNOSTICS_TIMEOUT: "300"
-          OV_CLI_SYNCHRONOUS_PARQUET: "1"
         shell: python
         run: |
           import os
@@ -126,12 +102,6 @@ jobs:
           test_path = Path("tests/openvino") / test_file
           if Path(test_file).name != test_file or not test_path.is_file() or test_path.suffix != ".py":
               sys.exit("Select an existing Python test filename under tests/openvino.")
-          command = [sys.executable, "-m", "pytest", str(test_path), *shlex.split(os.environ["PYTEST_ARGS"]), "-vv", "-rpfs"]
+          command = [sys.executable, "-m", "pytest", str(test_path), *shlex.split(os.environ["PYTEST_ARGS"]), "-rpfs"]
           print(shlex.join(command), flush=True)
           sys.exit(subprocess.call(command))
-
-      - name: Probe synchronous dataset-only streaming shutdown
-        if: ${{ !cancelled() && steps.native_debugger.outcome == 'success' }}
-        continue-on-error: true
-        timeout-minutes: 7
-        run: python tests/scripts/diagnose_subprocess.py --timeout 300 --probe-textvqa --synchronous-parquet
