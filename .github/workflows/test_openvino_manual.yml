@@ -31,6 +31,7 @@ env:
 jobs:
   test:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -86,10 +87,32 @@ jobs:
         if: env.HF_TOKEN == ''
         run: python tests/scripts/login_with_ci_token.py
 
+      - name: Report diagnostic environment
+        run: |
+          uname -a
+          lscpu
+          nproc
+          free -h
+          df -h / /dev/shm
+          python -VV
+          uv pip freeze
+
+      - name: Check dependency consistency
+        continue-on-error: true
+        run: uv pip check
+
+      - name: Install native debugger
+        id: native_debugger
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes gdb
+
       - name: Test with Pytest
+        timeout-minutes: 15
         env:
           TEST_FILE: ${{ inputs.test-file }}
           PYTEST_ARGS: ${{ inputs.pytest-args }}
+          OV_CLI_DIAGNOSTICS_TIMEOUT: "300"
         shell: python
         run: |
           import os
@@ -102,6 +125,12 @@ jobs:
           test_path = Path("tests/openvino") / test_file
           if Path(test_file).name != test_file or not test_path.is_file() or test_path.suffix != ".py":
               sys.exit("Select an existing Python test filename under tests/openvino.")
-          command = [sys.executable, "-m", "pytest", str(test_path), *shlex.split(os.environ["PYTEST_ARGS"]), "-rpfs"]
+          command = [sys.executable, "-m", "pytest", str(test_path), *shlex.split(os.environ["PYTEST_ARGS"]), "-vv", "-rpfs"]
           print(shlex.join(command), flush=True)
           sys.exit(subprocess.call(command))
+
+      - name: Probe dataset-only streaming shutdown
+        if: ${{ !cancelled() && steps.native_debugger.outcome == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 7
+        run: python tests/scripts/diagnose_subprocess.py --timeout 300 --probe-textvqa

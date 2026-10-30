@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import os
 import subprocess
+import sys
 import unittest
 from pathlib import Path
 from typing import Dict
@@ -1321,10 +1323,23 @@ class OVCLIExportTestCase(unittest.TestCase):
         is_prequantized = option is None
         with TemporaryDirectory() as tmpdir:
             weight_format = "" if is_prequantized else f"--weight-format {option}"
+            command = f"optimum-cli export openvino --model {MODEL_NAMES[model_type]} --task {task} {weight_format} {tmpdir}"
+            diagnostic_timeout = os.environ.get("OV_CLI_DIAGNOSTICS_TIMEOUT")
+            if diagnostic_timeout and sys.platform.startswith("linux"):
+                command = [
+                    sys.executable,
+                    str(Path(__file__).resolve().parents[1] / "scripts" / "diagnose_subprocess.py"),
+                    "--timeout",
+                    diagnostic_timeout,
+                    "--",
+                    "bash",
+                    "-c",
+                    f"exec {command}",
+                ]
             try:
                 result = subprocess.run(
-                    f"optimum-cli export openvino --model {MODEL_NAMES[model_type]} --task {task} {weight_format} {tmpdir}",
-                    shell=True,
+                    command,
+                    shell=isinstance(command, str),
                     check=True,
                     capture_output=True,
                 )
