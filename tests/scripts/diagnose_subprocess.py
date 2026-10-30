@@ -61,6 +61,9 @@ print("Enabled child-only synchronous Parquet control", flush=True)
 
 SYNCHRONOUS_CLI = """
 import sys
+import sysconfig
+
+sys.path[0] = sysconfig.get_path("scripts")
 
 from optimum.commands.optimum_cli import main
 
