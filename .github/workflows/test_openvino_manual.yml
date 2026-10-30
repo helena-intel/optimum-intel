@@ -43,48 +43,48 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        env:
-          TRANSFORMERS_VERSION: ${{ inputs.transformers-version }}
         run: |
           pip install --upgrade pip uv
-          requirements=(".[tests,diffusers]" librosa "datasets==3.6.0" "fsspec==2025.3.0" "pyarrow==26.0.0")
-          requirements+=("torch==2.14.1+cpu" "torchvision==0.29.1+cpu")
-          if [[ "$TRANSFORMERS_VERSION" == "latest" ]]; then
-            requirements+=(transformers)
-          else
-            requirements+=("transformers==$TRANSFORMERS_VERSION")
-          fi
-          if [[ "$TRANSFORMERS_VERSION" == "4.57.6" ]]; then
-            requirements+=("diffusers<0.40" "sentencepiece<0.2.2")
-          fi
-          uv pip install "${requirements[@]}"
+          uv pip install .[tests,diffusers] librosa
 
       - name: Restore HF models cache
+        id: hf-cache-restore
         if: env.HF_TOKEN == ''
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/huggingface/hub
           key: hf-models
 
+      - if: ${{ inputs.transformers-version != 'latest' }}
+        name: Install transformers
+        env:
+          TRANSFORMERS_VERSION: ${{ inputs.transformers-version }}
+        run: |
+          uv pip install "transformers==$TRANSFORMERS_VERSION"
+
+      - if: ${{ inputs.transformers-version == '4.57.6' }}
+        name: Pin diffusers (diffusers>=0.40 requires huggingface-hub>=1.23, incompatible with transformers==4.57.6's huggingface-hub<1.0)
+        run: |
+          uv pip install "diffusers<0.40"
+
+      - if: ${{ inputs.transformers-version == '4.57.6' }}
+        name: Install qwen-asr package
+        run: |
+          uv pip install qwen-asr
+
+      - if: ${{ inputs.transformers-version == '4.57.6' }}
+        name: Pin sentencepiece (0.2.2 fails to load some legacy remote-code tokenizer.model files)
+        run: |
+          uv pip install "sentencepiece<0.2.2"
+
+      - if: ${{ contains(inputs.test-file, 'decoder') }}
+        name: Install auto-gptq, autoawq
+        run: |
+          uv pip install auto-gptq "autoawq<0.2.8"
+
       - name: Login with fork PRs CI token
         if: env.HF_TOKEN == ''
         run: python tests/scripts/login_with_ci_token.py
-
-      - name: Check dependency versions and diffusion imports
-        shell: python
-        run: |
-          from importlib.metadata import version
-
-          packages = (
-              "optimum", "optimum-intel", "transformers", "diffusers", "huggingface-hub",
-              "torch", "torchvision", "datasets", "fsspec", "pyarrow",
-          )
-          for package in packages:
-              print(f"{package}=={version(package)}", flush=True)
-
-          from optimum.intel.openvino.modeling_diffusion import OVFlux2KleinPipeline
-
-          print(f"Diffusion import succeeded: {OVFlux2KleinPipeline}", flush=True)
 
       - name: Test with Pytest
         env:
