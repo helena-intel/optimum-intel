@@ -305,7 +305,7 @@ class OVCalibrationDatasetBuilder:
                     dataset_config_name=dataset_metadata.get("name"),
                     num_samples=config.num_samples,
                     dataset_split=dataset_metadata["split"],
-                    streaming=False,
+                    streaming=dataset_metadata.get("streaming", False),
                 )
             elif isinstance(self.model, _OVModelForWhisper):
                 dataset_metadata = PREDEFINED_SPEECH_TO_TEXT_DATASETS[config.dataset]
@@ -601,7 +601,10 @@ class OVCalibrationDatasetBuilder:
         }
 
         dataset = load_dataset(dataset_name, **datasets_kwargs)
-        dataset = dataset.shuffle(seed=self.seed)
+        if streaming and isinstance(self.model, OVModelForVisualCausalLM):
+            dataset = dataset.shuffle(seed=self.seed, buffer_size=16)
+        else:
+            dataset = dataset.shuffle(seed=self.seed)
         if num_samples is not None:
             dataset = dataset.take(num_samples)
 
