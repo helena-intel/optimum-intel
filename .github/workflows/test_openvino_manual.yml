@@ -129,8 +129,8 @@ jobs:
           print(shlex.join(command), flush=True)
           sys.exit(subprocess.call(command))
 
-      - name: Probe dataset-only streaming shutdown
+      - name: Probe synchronous dataset-only streaming shutdown
         if: ${{ !cancelled() && steps.native_debugger.outcome == 'success' }}
         continue-on-error: true
         timeout-minutes: 7
-        run: python tests/scripts/diagnose_subprocess.py --timeout 300 --probe-textvqa
+        run: python tests/scripts/diagnose_subprocess.py --timeout 300 --probe-textvqa --synchronous-parquet
