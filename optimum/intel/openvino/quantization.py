@@ -457,6 +457,21 @@ class OVCalibrationDatasetBuilder:
             **dataset_kwargs,
         )
 
+        if streaming and isinstance(self.model, OVModelForVisualCausalLM):
+            from functools import partial
+            from unittest.mock import patch
+
+            import pyarrow.dataset as arrow_dataset
+
+            parquet_format = partial(
+                arrow_dataset.ParquetFileFormat,
+                default_fragment_scan_options=arrow_dataset.ParquetFragmentScanOptions(pre_buffer=False),
+            )
+            with patch.object(arrow_dataset, "ParquetFileFormat", parquet_format):
+                return self.build_from_dataset(
+                    quantization_config, dataset, batch_size, data_collator, remove_unused_columns
+                )
+
         return self.build_from_dataset(quantization_config, dataset, batch_size, data_collator, remove_unused_columns)
 
     def build_from_dataset(
@@ -601,10 +616,7 @@ class OVCalibrationDatasetBuilder:
         }
 
         dataset = load_dataset(dataset_name, **datasets_kwargs)
-        if streaming and isinstance(self.model, OVModelForVisualCausalLM):
-            dataset = dataset.shuffle(seed=self.seed, buffer_size=16)
-        else:
-            dataset = dataset.shuffle(seed=self.seed)
+        dataset = dataset.shuffle(seed=self.seed)
         if num_samples is not None:
             dataset = dataset.take(num_samples)
 
