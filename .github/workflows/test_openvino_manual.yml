@@ -42,6 +42,11 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Install FFmpeg runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ffmpeg
+
       - name: Install dependencies
         run: |
           pip install --upgrade pip uv
