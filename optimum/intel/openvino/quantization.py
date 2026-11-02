@@ -601,7 +601,10 @@ class OVCalibrationDatasetBuilder:
         }
 
         dataset = load_dataset(dataset_name, **datasets_kwargs)
-        dataset = dataset.shuffle(seed=self.seed)
+        shuffle_kwargs = {}
+        if streaming and "max_buffer_input_shards" in inspect.signature(dataset.shuffle).parameters:
+            shuffle_kwargs["max_buffer_input_shards"] = 1
+        dataset = dataset.shuffle(seed=self.seed, **shuffle_kwargs)
         if num_samples is not None:
             dataset = dataset.take(num_samples)
 

@@ -23,6 +23,7 @@ from collections import defaultdict
 from collections.abc import Iterable
 from functools import partial
 from typing import Union, Type
+from unittest.mock import patch
 
 import pytest
 import numpy as np
@@ -136,6 +137,26 @@ pattern_prefix = "^__module.model"
 
 class OVQuantizerTest(unittest.TestCase):
     maxDiff = None
+
+    def test_streaming_calibration_shuffle_reads_one_shard(self):
+        from datasets import IterableDataset
+
+        opened_shards = set()
+
+        def generate_examples(shards):
+            for shard in shards:
+                opened_shards.add(shard)
+                for example in range(1100):
+                    yield {"text": f"{shard}:{example}"}
+
+        dataset = IterableDataset.from_generator(generate_examples, gen_kwargs={"shards": list(range(12))})
+        builder = OVCalibrationDatasetBuilder.__new__(OVCalibrationDatasetBuilder)
+        builder.seed = 42
+        with patch("datasets.load_dataset", return_value=dataset):
+            calibration_dataset = builder.load_dataset("unused", num_samples=1, streaming=True)
+            self.assertEqual(len(list(calibration_dataset)), 1)
+
+        self.assertEqual(len(opened_shards), 1)
 
     # TODO (nikita-savelyevv): Extend for OVModelForSpeechSeq2Seq, OVStableDiffusionPipeline and OVModelForSeq2SeqLM
     SUPPORTED_ARCHITECTURES_OV_MODEL = (
