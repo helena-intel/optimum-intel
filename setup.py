@@ -59,6 +59,7 @@ TESTS_REQUIRE = [
     "open_clip_torch>=2.26.1",
     "peft",
     "datasets[audio]",
+    "pyarrow<=24.0.0",
     "tbb",
     "hf_xet",
     "num2words",
