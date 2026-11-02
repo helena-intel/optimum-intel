@@ -1192,6 +1192,7 @@ class OVCalibrationDatasetBuilder:
 
         num_samples = quantization_config.num_samples or 128
         calibration_data = []
+        dataset_iterator = iter(dataset)
         try:
             inference_result_mock = {
                 "logits_per_image": np.empty((1,), np.float32),
@@ -1208,7 +1209,7 @@ class OVCalibrationDatasetBuilder:
 
             processor = None
             pbar = tqdm(total=num_samples, desc="Collecting calibration data")
-            for item in dataset:
+            for item in dataset_iterator:
                 if "input_ids" in item:
                     # Assuming that dataset contains already preprocessed text
                     inputs = self._wrap_sample_as_array(item, add_batch_dim=True)
@@ -1239,6 +1240,9 @@ class OVCalibrationDatasetBuilder:
                     break
         finally:
             self.model.request = self.model.request.request
+            close_iterator = getattr(dataset_iterator, "close", None)
+            if close_iterator is not None:
+                close_iterator()
 
         return OVCalibrationDataset({"model": nncf.Dataset(calibration_data)})
 

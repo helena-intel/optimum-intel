@@ -23,7 +23,7 @@ from collections import defaultdict
 from collections.abc import Iterable
 from functools import partial
 from typing import Union, Type
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 import numpy as np
@@ -157,6 +157,41 @@ class OVQuantizerTest(unittest.TestCase):
             self.assertEqual(len(list(calibration_dataset)), 1)
 
         self.assertEqual(len(opened_shards), 1)
+
+    @parameterized.expand([False, True])
+    def test_clip_calibration_closes_iterator(self, inference_fails):
+        closed = []
+
+        def generate_examples():
+            try:
+                for _ in range(2):
+                    yield {"input_ids": np.ones((1, 2), dtype=np.int64)}
+            finally:
+                closed.append(True)
+
+        dataset = generate_examples()
+        model = Mock()
+        model.config.max_position_embeddings = 32
+        model.request.query_state.return_value = []
+        original_request = model.request
+
+        def infer(**inputs):
+            if inference_fails:
+                raise RuntimeError("Inference failed")
+            model.request.infer(inputs)
+
+        model.side_effect = infer
+        builder = OVCalibrationDatasetBuilder(model)
+        config = OVQuantizationConfig(num_samples=1)
+        if inference_fails:
+            with self.assertRaisesRegex(RuntimeError, "Inference failed"):
+                builder._prepare_text_image_encoder_model_calibration_data(config, dataset)
+        else:
+            calibration_dataset = builder._prepare_text_image_encoder_model_calibration_data(config, dataset)
+            self.assertEqual(calibration_dataset["model"].get_length(), 1)
+
+        self.assertEqual(closed, [True])
+        self.assertIs(model.request, original_request)
 
     # TODO (nikita-savelyevv): Extend for OVModelForSpeechSeq2Seq, OVStableDiffusionPipeline and OVModelForSeq2SeqLM
     SUPPORTED_ARCHITECTURES_OV_MODEL = (
