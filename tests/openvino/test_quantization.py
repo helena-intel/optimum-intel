@@ -23,7 +23,7 @@ from collections import defaultdict
 from collections.abc import Iterable
 from functools import partial
 from typing import Union, Type
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 import numpy as np
@@ -169,7 +169,8 @@ class OVQuantizerTest(unittest.TestCase):
             finally:
                 closed.append(True)
 
-        dataset = generate_examples()
+        dataset = MagicMock()
+        dataset.__iter__.return_value = generate_examples()
         model = Mock()
         model.config.max_position_embeddings = 32
         model.request.query_state.return_value = []
