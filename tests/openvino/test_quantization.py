@@ -194,6 +194,50 @@ class OVQuantizerTest(unittest.TestCase):
         self.assertEqual(closed, [True])
         self.assertIs(model.request, original_request)
 
+    @parameterized.expand([False, True])
+    def test_vlm_calibration_closes_iterator(self, inference_fails):
+        closed = []
+        consumed = []
+
+        def generate_examples():
+            try:
+                for example in range(2):
+                    consumed.append(example)
+                    yield {"question": "What is shown?"}
+            finally:
+                closed.append(True)
+
+        dataset = MagicMock()
+        dataset.__iter__.return_value = generate_examples()
+        model = Mock()
+        model.config.model_type = "llava_next"
+        model.components = {}
+        model.language_model.config.model_type = "llama"
+        model.preprocess_inputs.return_value = {}
+        model.get_multimodal_embeddings.return_value = (None, None, None)
+        model.language_model.prepare_inputs.return_value = {"inputs_embeds": np.ones((1, 2, 4))}
+        if inference_fails:
+            model.preprocess_inputs.side_effect = RuntimeError("Preprocessing failed")
+        builder = OVCalibrationDatasetBuilder(model)
+        config = OVWeightQuantizationConfig(bits=4, num_samples=1, dataset="textvqa")
+        with (
+            patch("optimum.intel.openvino.quantization.AutoProcessor.from_pretrained"),
+            patch("optimum.intel.openvino.quantization.AutoTokenizer.from_pretrained"),
+            patch.dict(
+                "optimum.intel.openvino.quantization.PREDEFINED_VISUAL_LM_DATASETS",
+                {"textvqa": {"prompt_template": "{question}"}},
+            ),
+        ):
+            if inference_fails:
+                with self.assertRaisesRegex(RuntimeError, "Preprocessing failed"):
+                    builder._prepare_visual_causal_lm_calibration_data(config, dataset)
+            else:
+                calibration_dataset = builder._prepare_visual_causal_lm_calibration_data(config, dataset)
+                self.assertEqual(calibration_dataset["lm_model"].get_length(), 1)
+
+        self.assertEqual(closed, [True])
+        self.assertEqual(consumed, [0])
+
     # TODO (nikita-savelyevv): Extend for OVModelForSpeechSeq2Seq, OVStableDiffusionPipeline and OVModelForSeq2SeqLM
     SUPPORTED_ARCHITECTURES_OV_MODEL = (
         (OVModelForSequenceClassification, "bert", 32, 35),

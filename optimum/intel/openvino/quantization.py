@@ -850,12 +850,10 @@ class OVCalibrationDatasetBuilder:
             ov_component.compile()
             ov_component.request = InferRequestWrapper(ov_component.request, collected_inputs[ov_model_name])
 
+        dataset_iterator = iter(dataset)
         try:
             num_samples = config.num_samples or 32
-            for item in tqdm(dataset, desc="Collecting calibration dataset", total=num_samples):
-                if len(collected_inputs["lm_model"]) >= num_samples:
-                    break
-
+            for item in tqdm(dataset_iterator, desc="Collecting calibration dataset", total=num_samples):
                 # A VLM may tune only its language-model component on a text-only dataset without image metadata.
                 if "prompt_template" in dataset_metadata:
                     instruction = dataset_metadata["prompt_template"].format_map(item)
@@ -904,6 +902,8 @@ class OVCalibrationDatasetBuilder:
                 language_model_inputs = self.model.language_model.prepare_inputs(**prepare_inputs_kwargs)
 
                 collected_inputs["lm_model"].append(language_model_inputs)
+                if len(collected_inputs["lm_model"]) >= num_samples:
+                    break
 
             # If an input dict contains `pixel_values` key and its batch size is greater than 1, we split the data
             # into multiple single-batch dicts below. This lowers peak RAM consumption during quantization calibration.
@@ -940,6 +940,9 @@ class OVCalibrationDatasetBuilder:
         finally:
             for ov_component in vision_embedding_components:
                 ov_component.request = ov_component.request.request
+            close_iterator = getattr(dataset_iterator, "close", None)
+            if close_iterator is not None:
+                close_iterator()
 
         for ov_model_name in collected_inputs:
             collected_inputs[ov_model_name] = nncf.Dataset(collected_inputs[ov_model_name])
