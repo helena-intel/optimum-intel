@@ -523,7 +523,8 @@ class OVQuantizerTest(unittest.TestCase):
                 "lm_model": {"f8e4m3": 8, "int4": 14},
                 "text_embeddings_model": {"int8": 1},
                 "vision_embeddings_model": {"f8e4m3": 1},
-                "vision_embeddings_merger_model": {"f8e4m3": 2, "int4": 16},
+                # Counts observed with streaming TextVQA calibration in CI run 41622662784.
+                "vision_embeddings_merger_model": {"f8e4m3": 5, "int4": 10},
             },
         ),
         (
