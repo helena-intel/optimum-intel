@@ -48,6 +48,7 @@ TESTS_REQUIRE = [
     "py-cpuinfo",
     "sacremoses",
     "sentencepiece",
+    "soundfile",
     "rjieba",
     "timm",
     "invisible-watermark>=0.2.0",

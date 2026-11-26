@@ -17,6 +17,7 @@ import dataclasses
 import inspect
 import logging
 import random
+import wave
 from collections import UserDict, deque
 from contextlib import contextmanager
 from io import BytesIO
@@ -91,7 +92,17 @@ logger = logging.getLogger(__name__)
 
 def _is_torchcodec_audio_decoding_available() -> bool:
     try:
-        from torchcodec.decoders import AudioDecoder  # noqa: F401
+        from torchcodec.decoders import AudioDecoder
+
+        # Importing is not enough: torchcodec loads its native FFmpeg-based libraries lazily, when a decoder is
+        # created. So decode a tiny in-memory WAV file to check that torchcodec is actually usable.
+        wav = BytesIO()
+        with wave.open(wav, "wb") as f:
+            f.setnchannels(1)
+            f.setsampwidth(2)
+            f.setframerate(16000)
+            f.writeframes(bytes(320))
+        AudioDecoder(wav.getvalue()).get_all_samples()
     except Exception:
         # torchcodec may be missing, or installed but unusable (e.g. FFmpeg libraries or torch version mismatch)
         return False

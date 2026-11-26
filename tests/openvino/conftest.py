@@ -3,9 +3,7 @@ import os
 import pytest
 
 
-# OpenVINO telemetry forks a process for every event it sends; their pipes are not closed, so a long test session
-# runs out of file descriptors ("Too many open files"). Telemetry is disabled when CI=true, which is also set in
-# GitHub Actions. Set here (before any test runs) so that it also applies to optimum-cli subprocesses.
+# Disable OpenVINO telemetry for tests (CI=true). Also applies to optimum-cli subprocesses.
 os.environ.setdefault("CI", "true")
 
 

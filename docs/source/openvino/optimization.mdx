@@ -1016,7 +1016,7 @@ ov_model = OVModelForSpeechSeq2Seq.from_pretrained(
 
 With this, encoder and decoder models of the Whisper pipeline will be fully quantized, including activations.
 
-Decoding the calibration audio requires [soundfile](https://pypi.org/project/soundfile/) (`pip install soundfile`) or, with `datasets>=4.0`, alternatively [torchcodec](https://pypi.org/project/torchcodec/).
+Quantizing with a calibration audio dataset requires [soundfile](https://pypi.org/project/soundfile/) (`pip install soundfile`). With `datasets>=4.0`, [torchcodec](https://pypi.org/project/torchcodec/) also works.
 
 ##  Hybrid quantization
 
