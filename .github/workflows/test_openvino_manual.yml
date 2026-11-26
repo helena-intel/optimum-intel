@@ -25,7 +25,6 @@ env:
   UV_TORCH_BACKEND: cpu
   UV_SYSTEM_PYTHON: true
   TRANSFORMERS_IS_CI: true
-  PYTHONFAULTHANDLER: "1"
   HF_TOKEN: ${{ secrets.HF_HUB_READ_TOKEN }}
 
 jobs:
@@ -43,21 +42,9 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        env:
-          TRANSFORMERS_VERSION: ${{ inputs.transformers-version }}
         run: |
           pip install --upgrade pip uv
-          requirements=(".[tests,diffusers]" librosa "datasets==3.6.0" "fsspec==2025.3.0" "pyarrow==26.0.0")
-          requirements+=("torch==2.15.0+cpu" "torchvision==0.30.0+cpu" "qwen-asr")
-          if [[ "$TRANSFORMERS_VERSION" == "latest" ]]; then
-            requirements+=(transformers)
-          else
-            requirements+=("transformers==$TRANSFORMERS_VERSION")
-          fi
-          if [[ "$TRANSFORMERS_VERSION" == "4.57.6" ]]; then
-            requirements+=("diffusers<0.40" "sentencepiece<0.2.2")
-          fi
-          uv pip install "${requirements[@]}"
+          uv pip install .[tests,diffusers] librosa
 
       - name: Restore HF models cache
         if: env.HF_TOKEN == ''
@@ -70,21 +57,39 @@ jobs:
         if: env.HF_TOKEN == ''
         run: python tests/scripts/login_with_ci_token.py
 
-      - name: Check dependency versions and diffusion imports
-        shell: python
+      - if: ${{ inputs.transformers-version != 'latest' }}
+        name: Install transformers
+        env:
+          TRANSFORMERS_VERSION: ${{ inputs.transformers-version }}
         run: |
-          from importlib.metadata import version
+          # Include datasets so it is re-resolved against the huggingface-hub version of the selected transformers
+          uv pip install "transformers==$TRANSFORMERS_VERSION" datasets
 
-          packages = (
-              "optimum", "optimum-intel", "transformers", "diffusers", "huggingface-hub",
-              "torch", "torchvision", "datasets", "fsspec", "pyarrow",
-          )
-          for package in packages:
-              print(f"{package}=={version(package)}", flush=True)
+      - if: ${{ inputs.transformers-version == '4.57.6' }}
+        name: Pin diffusers (diffusers>=0.40 requires huggingface-hub>=1.23, incompatible with transformers==4.57.6's huggingface-hub<1.0)
+        run: |
+          uv pip install "diffusers<0.40"
 
-          from optimum.intel.openvino.modeling_diffusion import OVFlux2KleinPipeline
+      - if: ${{ inputs.transformers-version == '4.57.6' }}
+        name: Install qwen-asr package
+        run: |
+          uv pip install qwen-asr
 
-          print(f"Diffusion import succeeded: {OVFlux2KleinPipeline}", flush=True)
+      - if: ${{ inputs.transformers-version == '4.57.6' }}
+        name: Pin sentencepiece (0.2.2 fails to load some legacy remote-code tokenizer.model files)
+        run: |
+          uv pip install "sentencepiece<0.2.2"
+
+      - if: ${{ inputs.test-file == 'test_decoder.py' }}
+        name: Install auto-gptq, autoawq
+        run: |
+          uv pip install auto-gptq "autoawq<0.2.8"
+
+      - name: Show CPU info
+        run: |
+          lscpu | grep 'Model name'
+          echo 'CPU flags of interest:'
+          grep -o -E 'avx512f|avx512_bf16|amx_bf16|amx_tile' /proc/cpuinfo | sort -u
 
       - name: Test with Pytest
         env:
