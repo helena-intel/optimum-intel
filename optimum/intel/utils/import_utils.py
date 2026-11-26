@@ -133,7 +133,9 @@ _torchaudio_version = "N/A"
 if _torchaudio_available:
     try:
         _torchaudio_version = importlib_metadata.version("torchaudio")
-    except importlib_metadata.PackageNotFoundError:
+        # torchaudio binaries are tied to a specific torch version, so check that it actually imports
+        import torchaudio  # noqa: F401
+    except (importlib_metadata.PackageNotFoundError, ImportError, OSError):
         _torchaudio_available = False
 
 _sentencepiece_available = importlib.util.find_spec("sentencepiece") is not None

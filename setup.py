@@ -48,7 +48,6 @@ TESTS_REQUIRE = [
     "py-cpuinfo",
     "sacremoses",
     "sentencepiece",
-    "torchaudio",
     "rjieba",
     "timm",
     "invisible-watermark>=0.2.0",
@@ -58,8 +57,7 @@ TESTS_REQUIRE = [
     "sentence-transformers<5.4.0",
     "open_clip_torch>=2.26.1",
     "peft",
-    "datasets[audio]",
-    "pyarrow<=24.0.0",
+    "datasets>=4.0.0",
     "tbb",
     "hf_xet",
     "num2words",
@@ -71,7 +69,6 @@ TESTS_REQUIRE = [
     "imageio",
     "kokoro",
     "protobuf",
-    "funasr"
 ]
 
 QUALITY_REQUIRE = ["black~=23.1", "ruff==0.4.4"]

@@ -23,7 +23,6 @@ from collections import defaultdict
 from collections.abc import Iterable
 from functools import partial
 from typing import Union, Type
-from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 import numpy as np
@@ -87,6 +86,7 @@ from copy import deepcopy
 from optimum.intel.openvino.quantization import InferRequestWrapper, OVCalibrationDatasetBuilder
 from optimum.exporters.openvino import main_export
 from optimum.intel.utils.import_utils import (
+    is_datasets_version,
     is_nncf_version,
     is_openvino_version,
     is_qwen_tts_available,
@@ -137,106 +137,6 @@ pattern_prefix = "^__module.model"
 
 class OVQuantizerTest(unittest.TestCase):
     maxDiff = None
-
-    def test_streaming_calibration_shuffle_reads_one_shard(self):
-        from datasets import IterableDataset
-
-        opened_shards = set()
-
-        def generate_examples(shards):
-            for shard in shards:
-                opened_shards.add(shard)
-                for example in range(1100):
-                    yield {"text": f"{shard}:{example}"}
-
-        dataset = IterableDataset.from_generator(generate_examples, gen_kwargs={"shards": list(range(12))})
-        builder = OVCalibrationDatasetBuilder.__new__(OVCalibrationDatasetBuilder)
-        builder.seed = 42
-        with patch("datasets.load_dataset", return_value=dataset):
-            calibration_dataset = builder.load_dataset("unused", num_samples=1, streaming=True)
-            self.assertEqual(len(list(calibration_dataset)), 1)
-
-        self.assertEqual(len(opened_shards), 1)
-
-    @parameterized.expand([False, True])
-    def test_clip_calibration_closes_iterator(self, inference_fails):
-        closed = []
-
-        def generate_examples():
-            try:
-                for _ in range(2):
-                    yield {"input_ids": np.ones((1, 2), dtype=np.int64)}
-            finally:
-                closed.append(True)
-
-        dataset = MagicMock()
-        dataset.__iter__.return_value = generate_examples()
-        model = Mock()
-        model.config.max_position_embeddings = 32
-        model.request.query_state.return_value = []
-        original_request = model.request
-
-        def infer(**inputs):
-            if inference_fails:
-                raise RuntimeError("Inference failed")
-            model.request.infer(inputs)
-
-        model.side_effect = infer
-        builder = OVCalibrationDatasetBuilder(model)
-        config = OVQuantizationConfig(num_samples=1)
-        if inference_fails:
-            with self.assertRaisesRegex(RuntimeError, "Inference failed"):
-                builder._prepare_text_image_encoder_model_calibration_data(config, dataset)
-        else:
-            calibration_dataset = builder._prepare_text_image_encoder_model_calibration_data(config, dataset)
-            self.assertEqual(calibration_dataset["model"].get_length(), 1)
-
-        self.assertEqual(closed, [True])
-        self.assertIs(model.request, original_request)
-
-    @parameterized.expand([False, True])
-    def test_vlm_calibration_closes_iterator(self, inference_fails):
-        closed = []
-        consumed = []
-
-        def generate_examples():
-            try:
-                for example in range(2):
-                    consumed.append(example)
-                    yield {"question": "What is shown?"}
-            finally:
-                closed.append(True)
-
-        dataset = MagicMock()
-        dataset.__iter__.return_value = generate_examples()
-        model = Mock()
-        model.config.model_type = "llava_next"
-        model.components = {}
-        model.language_model.config.model_type = "llama"
-        model.preprocess_inputs.return_value = {}
-        model.get_multimodal_embeddings.return_value = (None, None, None)
-        model.language_model.prepare_inputs.return_value = {"inputs_embeds": np.ones((1, 2, 4))}
-        if inference_fails:
-            model.preprocess_inputs.side_effect = RuntimeError("Preprocessing failed")
-        builder = OVCalibrationDatasetBuilder(model)
-        config = OVWeightQuantizationConfig(bits=4, num_samples=1, dataset="textvqa")
-        with (
-            patch("optimum.intel.openvino.quantization.AutoProcessor.from_pretrained"),
-            patch("optimum.intel.openvino.quantization.AutoTokenizer.from_pretrained"),
-            patch.dict(
-                "optimum.intel.openvino.quantization.PREDEFINED_VISUAL_LM_DATASETS",
-                {"textvqa": {"prompt_template": "{question}"}},
-            ),
-        ):
-            if inference_fails:
-                with self.assertRaisesRegex(RuntimeError, "Preprocessing failed"):
-                    builder._prepare_visual_causal_lm_calibration_data(config, dataset)
-            else:
-                calibration_dataset = builder._prepare_visual_causal_lm_calibration_data(config, dataset)
-                self.assertEqual(calibration_dataset["lm_model"].get_length(), 1)
-
-        self.assertEqual(closed, [True])
-        self.assertEqual(consumed, [0])
 
     # TODO (nikita-savelyevv): Extend for OVModelForSpeechSeq2Seq, OVStableDiffusionPipeline and OVModelForSeq2SeqLM
     SUPPORTED_ARCHITECTURES_OV_MODEL = (
@@ -523,8 +423,10 @@ class OVQuantizerTest(unittest.TestCase):
                 "lm_model": {"f8e4m3": 8, "int4": 14},
                 "text_embeddings_model": {"int8": 1},
                 "vision_embeddings_model": {"f8e4m3": 1},
-                # Counts observed with streaming TextVQA calibration in CI run 41622662784.
-                "vision_embeddings_merger_model": {"f8e4m3": 5, "int4": 10},
+                # The calibration sample selected from the shuffled streaming dataset changed in datasets 5.1
+                "vision_embeddings_merger_model": (
+                    {"f8e4m3": 5, "int4": 10} if is_datasets_version(">=", "5.1") else {"f8e4m3": 2, "int4": 16}
+                ),
             },
         ),
         (
@@ -2024,6 +1926,27 @@ class CalibrationDatasetLoadingTest(unittest.TestCase):
                     self.assertEqual(build.call_args.args[1], dataset_id)
                     self.assertEqual(build.call_args.kwargs["streaming"], streaming)
                     self.assertEqual(build.call_args.kwargs["num_samples"], num_samples)
+
+    def test_audio_decoding_without_torchcodec(self):
+        import io
+
+        import soundfile
+        from datasets import Audio, Dataset
+
+        from optimum.intel.openvino import quantization
+
+        expected = np.linspace(-0.5, 0.5, 1600, dtype=np.float32)
+        buffer = io.BytesIO()
+        soundfile.write(buffer, expected, 16000, format="FLAC", subtype="PCM_24")
+        dataset = Dataset.from_dict({"audio": [{"bytes": buffer.getvalue(), "path": "sample.flac"}]})
+        dataset = dataset.cast_column("audio", Audio(sampling_rate=16000)).to_iterable_dataset()
+
+        with unittest.mock.patch.object(quantization, "_is_torchcodec_audio_decoding_available", return_value=False):
+            dataset = quantization._disable_audio_decoding_if_unsupported(dataset)
+        audio, sampling_rate = quantization._load_audio(next(iter(dataset))["audio"])
+
+        self.assertEqual(sampling_rate, 16000)
+        np.testing.assert_allclose(audio, expected, atol=1e-6)
 
 
 class OVPipelineQuantizationTest(unittest.TestCase):

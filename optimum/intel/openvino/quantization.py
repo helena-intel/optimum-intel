@@ -42,6 +42,7 @@ from ..utils.import_utils import (
     PILLOW_IMPORT_ERROR,
     _nncf_version,
     is_datasets_available,
+    is_datasets_version,
     is_diffusers_available,
     is_nncf_version,
     is_pillow_available,
@@ -86,6 +87,55 @@ if is_sentence_transformers_available():
 
 core = Core()
 logger = logging.getLogger(__name__)
+
+
+def _is_torchcodec_audio_decoding_available() -> bool:
+    try:
+        from torchcodec.decoders import AudioDecoder  # noqa: F401
+    except Exception:
+        # torchcodec may be missing, or installed but unusable (e.g. FFmpeg libraries or torch version mismatch)
+        return False
+    return True
+
+
+def _disable_audio_decoding_if_unsupported(dataset: "Dataset", column: str = "audio") -> "Dataset":
+    """
+    Starting from datasets 4.0, audio decoding requires torchcodec. If it is not usable, disable decoding so that
+    raw audio bytes can be decoded with soundfile by `_load_audio` instead.
+    """
+    if not is_datasets_version(">=", "4.0.0") or _is_torchcodec_audio_decoding_available():
+        return dataset
+
+    from datasets import Audio
+
+    features = getattr(dataset, "features", None)
+    if features is not None and isinstance(features.get(column), Audio) and features[column].decode:
+        dataset = dataset.cast_column(column, Audio(sampling_rate=features[column].sampling_rate, decode=False))
+    return dataset
+
+
+def _load_audio(audio: Any):
+    """
+    Returns an (array, sampling_rate) tuple for an audio sample, which can either be decoded by `datasets` (a dict
+    with "array" and "sampling_rate" keys, or a torchcodec `AudioDecoder` with datasets>=4.0) or be undecoded
+    (a dict with "bytes" and "path" keys).
+    """
+    if not isinstance(audio, dict) or "array" in audio:
+        return audio["array"], audio["sampling_rate"]
+
+    try:
+        import soundfile
+    except ImportError:
+        raise ImportError(
+            "Decoding audio calibration data requires `torchcodec` (with datasets>=4.0) or `soundfile`. "
+            "Please install one of them, for example with `pip install soundfile`."
+        )
+    source = BytesIO(audio["bytes"]) if audio.get("bytes") is not None else audio["path"]
+    array, sampling_rate = soundfile.read(source, dtype="float32")
+    if array.ndim > 1:
+        # Convert multichannel audio to mono
+        array = array.mean(axis=1)
+    return array, sampling_rate
 
 
 class OVCalibrationDataset(UserDict):
@@ -603,6 +653,9 @@ class OVCalibrationDatasetBuilder:
         dataset = load_dataset(dataset_name, **datasets_kwargs)
         shuffle_kwargs = {}
         if streaming and "max_buffer_input_shards" in inspect.signature(dataset.shuffle).parameters:
+            # Since datasets 5.0, the shuffle buffer of a streaming dataset is filled from up to 10 shards in
+            # parallel by default, which for image datasets can take more than 15GB of RAM even for a single sample.
+            # Read one shard at a time, as with earlier datasets versions.
             shuffle_kwargs["max_buffer_input_shards"] = 1
         dataset = dataset.shuffle(seed=self.seed, **shuffle_kwargs)
         if num_samples is not None:
@@ -850,10 +903,12 @@ class OVCalibrationDatasetBuilder:
             ov_component.compile()
             ov_component.request = InferRequestWrapper(ov_component.request, collected_inputs[ov_model_name])
 
-        dataset_iterator = iter(dataset)
         try:
             num_samples = config.num_samples or 32
-            for item in tqdm(dataset_iterator, desc="Collecting calibration dataset", total=num_samples):
+            for item in tqdm(dataset, desc="Collecting calibration dataset", total=num_samples):
+                if len(collected_inputs["lm_model"]) >= num_samples:
+                    break
+
                 # A VLM may tune only its language-model component on a text-only dataset without image metadata.
                 if "prompt_template" in dataset_metadata:
                     instruction = dataset_metadata["prompt_template"].format_map(item)
@@ -902,8 +957,6 @@ class OVCalibrationDatasetBuilder:
                 language_model_inputs = self.model.language_model.prepare_inputs(**prepare_inputs_kwargs)
 
                 collected_inputs["lm_model"].append(language_model_inputs)
-                if len(collected_inputs["lm_model"]) >= num_samples:
-                    break
 
             # If an input dict contains `pixel_values` key and its batch size is greater than 1, we split the data
             # into multiple single-batch dicts below. This lowers peak RAM consumption during quantization calibration.
@@ -940,9 +993,6 @@ class OVCalibrationDatasetBuilder:
         finally:
             for ov_component in vision_embedding_components:
                 ov_component.request = ov_component.request.request
-            close_iterator = getattr(dataset_iterator, "close", None)
-            if close_iterator is not None:
-                close_iterator()
 
         for ov_model_name in collected_inputs:
             collected_inputs[ov_model_name] = nncf.Dataset(collected_inputs[ov_model_name])
@@ -968,11 +1018,11 @@ class OVCalibrationDatasetBuilder:
 
             # Download audio inputs beforehand to avoid possible connection issues
             num_samples = config.num_samples or 32
+            dataset = _disable_audio_decoding_if_unsupported(dataset)
             dataset = list(tqdm(dataset.take(num_samples), desc="Downloading audio inputs", total=num_samples))
 
             for item in tqdm(dataset, desc="Collecting calibration data"):
-                audio = item["audio"]["array"]
-                sampling_rate = item["audio"]["sampling_rate"]
+                audio, sampling_rate = _load_audio(item["audio"])
                 input_features = processor(audio, sampling_rate=sampling_rate, return_tensors="pt").input_features
                 self.model.generate(input_features)
         finally:
@@ -1195,7 +1245,6 @@ class OVCalibrationDatasetBuilder:
 
         num_samples = quantization_config.num_samples or 128
         calibration_data = []
-        dataset_iterator = iter(dataset)
         try:
             inference_result_mock = {
                 "logits_per_image": np.empty((1,), np.float32),
@@ -1212,7 +1261,7 @@ class OVCalibrationDatasetBuilder:
 
             processor = None
             pbar = tqdm(total=num_samples, desc="Collecting calibration data")
-            for item in dataset_iterator:
+            for item in dataset:
                 if "input_ids" in item:
                     # Assuming that dataset contains already preprocessed text
                     inputs = self._wrap_sample_as_array(item, add_batch_dim=True)
@@ -1243,9 +1292,6 @@ class OVCalibrationDatasetBuilder:
                     break
         finally:
             self.model.request = self.model.request.request
-            close_iterator = getattr(dataset_iterator, "close", None)
-            if close_iterator is not None:
-                close_iterator()
 
         return OVCalibrationDataset({"model": nncf.Dataset(calibration_data)})
 
