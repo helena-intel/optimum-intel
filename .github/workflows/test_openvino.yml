@@ -99,6 +99,12 @@ jobs:
         run: |
           python tests/scripts/login_with_ci_token.py
 
+      - name: Show CPU info (temporary, for debugging)
+        run: |
+          lscpu | grep 'Model name'
+          echo 'CPU flags of interest:'
+          grep -o -E 'avx512f|avx512_bf16|amx_bf16|amx_tile' /proc/cpuinfo | sort -u
+
       - name: Test with Pytest
         run: |
           pytest tests/openvino/${{ matrix.test-pattern }} -k "not (qwen3_asr or fun_asr or sense_voice)" --durations=0
