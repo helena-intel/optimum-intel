@@ -49,6 +49,7 @@ TESTS_REQUIRE = [
     "sacremoses",
     "sentencepiece",
     "soundfile",
+    "torchaudio",
     "rjieba",
     "timm",
     "invisible-watermark>=0.2.0",
