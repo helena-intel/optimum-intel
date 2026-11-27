@@ -31,6 +31,8 @@ env:
   TRANSFORMERS_IS_CI: true
   HF_TOKEN: ${{ secrets.HF_HUB_READ_TOKEN }}
   # Inputs are only set for manual runs. For pull_request runs a small smoke test is used.
+  # Note: inputs are not validated (except that test-file must be an existing test file). Manual runs can only be
+  # started by users with write access, and the values are only passed through the environment, never into scripts.
   TEST_FILE: ${{ inputs.test-file || 'test_transformations.py' }}
   PYTEST_ARGS: ${{ inputs.pytest-args || '' }}
   TRANSFORMERS_VERSION: ${{ inputs.transformers-version || 'latest' }}
