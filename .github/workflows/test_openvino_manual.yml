@@ -7,7 +7,6 @@ on:
         description: "Test file under tests/openvino (e.g. test_exporters_cli.py)"
         required: true
         type: string
-        default: test_exporters_cli.py
       pytest-args:
         description: "Additional pytest arguments (e.g. -k llava)"
         required: false
@@ -18,6 +17,11 @@ on:
         required: true
         type: string
         default: latest
+  # Lets reviewers see this workflow run in a PR that changes it (a workflow_dispatch workflow can only be started
+  # manually once it exists on the default branch). A small smoke test is used, since there are no inputs.
+  pull_request:
+    paths:
+      - .github/workflows/test_openvino_manual.yml
 
 permissions: {}
 
@@ -26,6 +30,10 @@ env:
   UV_SYSTEM_PYTHON: true
   TRANSFORMERS_IS_CI: true
   HF_TOKEN: ${{ secrets.HF_HUB_READ_TOKEN }}
+  # Inputs are only set for manual runs. For pull_request runs a small smoke test is used.
+  TEST_FILE: ${{ inputs.test-file || 'test_transformations.py' }}
+  PYTEST_ARGS: ${{ inputs.pytest-args || '' }}
+  TRANSFORMERS_VERSION: ${{ inputs.transformers-version || 'latest' }}
 
 jobs:
   test:
@@ -57,30 +65,28 @@ jobs:
         if: env.HF_TOKEN == ''
         run: python tests/scripts/login_with_ci_token.py
 
-      - if: ${{ inputs.transformers-version != 'latest' }}
+      - if: ${{ env.TRANSFORMERS_VERSION != 'latest' }}
         name: Install transformers
-        env:
-          TRANSFORMERS_VERSION: ${{ inputs.transformers-version }}
         run: |
           # Include datasets so it is re-resolved against the huggingface-hub version of the selected transformers
           uv pip install "transformers==$TRANSFORMERS_VERSION" datasets
 
-      - if: ${{ inputs.transformers-version == '4.57.6' }}
+      - if: ${{ env.TRANSFORMERS_VERSION == '4.57.6' }}
         name: Pin diffusers (diffusers>=0.40 requires huggingface-hub>=1.23, incompatible with transformers==4.57.6's huggingface-hub<1.0)
         run: |
           uv pip install "diffusers<0.40"
 
-      - if: ${{ inputs.transformers-version == '4.57.6' }}
+      - if: ${{ env.TRANSFORMERS_VERSION == '4.57.6' }}
         name: Install qwen-asr package
         run: |
           uv pip install qwen-asr
 
-      - if: ${{ inputs.transformers-version == '4.57.6' }}
+      - if: ${{ env.TRANSFORMERS_VERSION == '4.57.6' }}
         name: Pin sentencepiece (0.2.2 fails to load some legacy remote-code tokenizer.model files)
         run: |
           uv pip install "sentencepiece<0.2.2"
 
-      - if: ${{ inputs.test-file == 'test_decoder.py' }}
+      - if: ${{ env.TEST_FILE == 'test_decoder.py' }}
         name: Install auto-gptq, autoawq
         run: |
           uv pip install auto-gptq "autoawq<0.2.8"
@@ -92,9 +98,6 @@ jobs:
           grep -o -E 'avx512f|avx512_bf16|amx_bf16|amx_tile' /proc/cpuinfo | sort -u
 
       - name: Test with Pytest
-        env:
-          TEST_FILE: ${{ inputs.test-file }}
-          PYTEST_ARGS: ${{ inputs.pytest-args }}
         shell: python
         run: |
           import os
